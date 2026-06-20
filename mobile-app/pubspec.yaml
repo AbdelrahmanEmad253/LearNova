@@ -1,0 +1,91 @@
+name: learnova
+description: "A new Flutter project."
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  flutter_svg: ^2.0.10+1
+  sign_in_button: ^3.2.0
+  google_sign_in: ^7.2.0
+  supabase_flutter: ^2.12.2
+  riverpod: ^3.2.1
+  flutter_riverpod: ^3.0.3
+  shared_preferences: ^2.5.3
+  just_audio: ^0.9.40
+  video_player: ^2.9.2
+  url_launcher: ^6.3.1
+  webview_flutter: ^4.10.0
+  http: ^1.2.0
+  html: ^0.15.4
+  youtube_player_flutter: ^9.1.3
+  google_fonts: ^8.1.0
+  image_picker: ^1.2.2
+  dartz: ^0.10.1
+  equatable: ^2.0.5
+  freezed_annotation: ^2.4.4
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  flutter_launcher_icons: ^0.14.3
+  build_runner: ^2.4.9
+  freezed: ^2.5.2
+  json_serializable: ^6.8.0
+  flutter_native_splash: ^2.4.7
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  web:
+    generate: true
+    image_path: "assets/logo/LearNovaLogo.png"
+  windows:
+    generate: true
+    image_path: "assets/logo/LearNovaLogo.png"
+  image_path: "assets/logo/LearNovaLogo.png"
+  adaptive_icon_background: "#0B1628"
+  adaptive_icon_foreground: "assets/logo/LearNovaLogo.png"
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/SpaceBackground.png
+    - assets/avatar/
+    - assets/waves/
+    - assets/waves/welcoming_waves/
+    - assets/star/
+    - assets/waves/test/
+    - assets/waves/test/icons/
+    - assets/map/
+    - assets/map/levelslands/lev1/leftisland.png
+    - assets/map/levelslands/lev1/rightisland.png
+    - assets/map/levelslands/lev1/examisland.png
+    - assets/map/levelslands/lev2/leftisland.png
+    - assets/map/levelslands/lev2/rightisland.png
+    - assets/map/levelslands/lev2/rightisland2.png
+    - assets/map/levelslands/lev2/examsland.png
+    - assets/map/levelslands/lev3/rlisland.png
+    - assets/map/levelslands/lev3/examisland.png
+    - assets/profile/
+    - assets/quests/
+    - assets/star/figma_audio/
+    - assets/star/figma_audio_28283/
+    - assets/logo/
+
+flutter_native_splash:
+  color: "#FAFBFD"
+  color_dark: "#0B1628"
+  image: "assets/logo/padded_splash.png"
+  android_12:
+    image: "assets/logo/padded_splash.png"
+    icon_background_color: "#FAFBFD"
+    icon_background_color_dark: "#0B1628"

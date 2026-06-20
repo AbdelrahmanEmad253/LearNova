@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "skills": {
+    "entrig-android": {
+      "source": "entrig/entrig-skills",
+      "sourceType": "github",
+      "skillPath": "skills/entrig-android/SKILL.md",
+      "computedHash": "7a6732384dfd13c9b85e28c00fd9c4fc70956bb64bd8dbc425e1a394216aa8d3"
+    },
+    "entrig-capacitor": {
+      "source": "entrig/entrig-skills",
+      "sourceType": "github",
+      "skillPath": "skills/entrig-capacitor/SKILL.md",
+      "computedHash": "5fc82e29fbde47bf9857149be14010fd7ecb69061f1f47ac9edbf7c763639d52"
+    },
+    "entrig-expo": {
+      "source": "entrig/entrig-skills",
+      "sourceType": "github",
+      "skillPath": "skills/entrig-expo/SKILL.md",
+      "computedHash": "4e31e808e945f12b8384231f49f885370b202147afc0c97c2016802604c2bf9a"
+    },
+    "entrig-flutter": {
+      "source": "entrig/entrig-skills",
+      "sourceType": "github",
+      "skillPath": "skills/entrig-flutter/SKILL.md",
+      "computedHash": "0fcc41222e5464f1606679de92f3c8e0a89459d1797b6a1d3cf0537872f96e10"
+    },
+    "entrig-ios": {
+      "source": "entrig/entrig-skills",
+      "sourceType": "github",
+      "skillPath": "skills/entrig-ios/SKILL.md",
+      "computedHash": "3f4c0193f1d338f76fbcf12de3493e5ac8b95dbf9ce17c37c4d2739f600af2a3"
+    },
+    "entrig-mcp": {
+      "source": "entrig/entrig-skills",
+      "sourceType": "github",
+      "skillPath": "skills/entrig-mcp/SKILL.md",
+      "computedHash": "50d1a4e600b33c4720cc2543f7852f8e1459d4e19edf600f6b6c2b625b9ad0ca"
+    },
+    "entrig-react-native": {
+      "source": "entrig/entrig-skills",
+      "sourceType": "github",
+      "skillPath": "skills/entrig-react-native/SKILL.md",
+      "computedHash": "1377c98bb2d8a61ce37c8b716c8a5ca47ec68ea52746a09c08adaa12a17f291f"
+    },
+    "supabase": {
+      "source": "supabase/agent-skills",
+      "sourceType": "github",
+      "computedHash": "3bc4f56943a13f4fe355742a4b3b30c56008e6d265ae71f19c592410b5f5a01f"
+    },
+    "supabase-postgres-best-practices": {
+      "source": "supabase/agent-skills",
+      "sourceType": "github",
+      "computedHash": "abf015aafed757edaf2a329299fc106abebdc53bc7f089e92e1f762ed3d8f117"
+    }
+  }
+}

@@ -1,0 +1,291 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_svg/flutter_svg.dart';
+import 'package:learnova/core/navigation/app_route_paths.dart';
+import 'package:learnova/core/navigation/app_router.dart';
+import 'package:learnova/core/theme/app_colors_theme.dart';
+import 'package:learnova/core/widgets/custom_button.dart';
+import 'package:learnova/core/widgets/space_scaffold.dart';
+import 'package:learnova/features/assessment/domain/entities/assessment_test.dart';
+import 'package:learnova/features/assessment/presentation/providers/assessment_providers.dart';
+import 'package:learnova/features/assessment/presentation/screens/test_description_screen.dart';
+import 'package:learnova/features/assessment/presentation/screens/final_results_summary_screen.dart';
+import 'package:learnova/core/navigation/main_navigation_screen.dart';
+import 'package:learnova/features/home/presentation/providers/home_providers.dart';
+import 'package:learnova/core/constants/app_assets.dart';
+
+class TestCompleteScreen extends ConsumerStatefulWidget {
+  final int testIndex;
+  final bool returnToMapOnContinue;
+  final String? standaloneTitle;
+  final int? scorePercentage;
+  final String? sourceNodeId;
+  final bool? didPass;
+
+  const TestCompleteScreen({
+    super.key,
+    required this.testIndex,
+    this.returnToMapOnContinue = false,
+    this.standaloneTitle,
+    this.scorePercentage,
+    this.sourceNodeId,
+    this.didPass,
+  });
+
+  @override
+  ConsumerState<TestCompleteScreen> createState() => _TestCompleteScreenState();
+}
+
+class _TestCompleteScreenState extends ConsumerState<TestCompleteScreen> {
+  @override
+  Widget build(BuildContext context) {
+    final testsAsync = ref.watch(assessmentTestsProvider);
+    final colors = AppColors.of(context);
+
+    return testsAsync.when(
+      loading: () => Scaffold(
+        backgroundColor: colors.background,
+        body: Center(child: CircularProgressIndicator(color: colors.primary)),
+      ),
+      error: (e, _) => Scaffold(
+        backgroundColor: colors.background,
+        body: Center(
+          child: Text('Error: $e', style: TextStyle(color: colors.textPrimary)),
+        ),
+      ),
+      data: (tests) => _buildContent(context, tests),
+    );
+  }
+
+  Widget _buildContent(BuildContext context, List<AssessmentTest> tests) {
+    final colors = AppColors.of(context);
+
+    if (tests.isEmpty || widget.testIndex >= tests.length) {
+      return Scaffold(
+        backgroundColor: colors.background,
+        body: Center(
+          child: Text(
+            'No result data found.',
+            style: TextStyle(color: colors.textPrimary),
+          ),
+        ),
+      );
+    }
+
+    final Size size = MediaQuery.of(context).size;
+    final currentResult = tests[widget.testIndex];
+    final bool isLastTest = widget.testIndex == tests.length - 1;
+    final String title = widget.standaloneTitle ?? currentResult.title;
+    final bool showNumericScore = widget.scorePercentage != null;
+
+    return SpaceScaffold(
+      child: Stack(
+        children: [
+          // Base Top SVG (Constant Background Shape)
+          Positioned(
+            top: size.height * 0.29,
+            left: 0,
+            right: 0,
+            child: SvgPicture.asset(
+              AppAssets.testStartTop,
+              width: size.width,
+              fit: BoxFit.fitWidth,
+              alignment: Alignment.topCenter,
+            ),
+          ),
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: SvgPicture.asset(
+              currentResult.topSvgPath,
+              width: size.width,
+              fit: BoxFit.fitWidth,
+              alignment: Alignment.topCenter,
+            ),
+          ),
+
+          // Bottom SVG Layer (Using minibot.svg)
+          Positioned(
+            bottom: 0,
+            left: 0,
+            right: 0,
+            child: SvgPicture.asset(
+              AppAssets.testMiniBottom,
+              width: size.width,
+              fit: BoxFit.fitWidth,
+              alignment: Alignment.bottomCenter,
+            ),
+          ),
+
+          // Content Layer
+          SafeArea(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 40.0),
+              child: Column(
+                children: [
+                  const SizedBox(height: 60),
+                  SvgPicture.asset(
+                    currentResult.iconPath,
+                    width: 80,
+                    height: 80,
+                    colorFilter:
+                        ColorFilter.mode(colors.textPrimary, BlendMode.srcIn),
+                  ),
+                  const SizedBox(height: 20),
+                  Text(
+                    '$title Completed!',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      color: colors.textPrimary,
+                      fontSize: 26,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  const Spacer(flex: 2),
+                  if (showNumericScore) ...[
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        color: colors.primary,
+                        borderRadius: BorderRadius.circular(32),
+                      ),
+                      child: Text(
+                        'Your Score:',
+                        style: TextStyle(
+                          color: colors.buttonForeground,
+                          fontSize: 20,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 18),
+                    Text(
+                      '${widget.scorePercentage!.clamp(0, 100)}%',
+                      style: TextStyle(
+                        color: colors.primary,
+                        fontSize: 56,
+                        fontWeight: FontWeight.w900,
+                        fontStyle: FontStyle.italic,
+                        shadows: [
+                          Shadow(
+                            color: colors.primary.withValues(alpha: 0.8),
+                            blurRadius: 25,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ] else ...[
+                    Text(
+                      currentResult.resultDescription,
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: colors.textSecondary,
+                        fontSize: 16,
+                        height: 1.4,
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    Text(
+                      currentResult.resultTitle,
+                      style: TextStyle(
+                        color: colors.primary,
+                        fontSize: 48,
+                        fontWeight: FontWeight.w900,
+                        fontStyle: FontStyle.italic,
+                        shadows: [
+                          Shadow(
+                            color: colors.primary.withValues(alpha: 0.8),
+                            blurRadius: 25,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 20),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: colors.cardBackground.withValues(alpha: 0.75),
+                      borderRadius: BorderRadius.circular(24),
+                    ),
+                    child: Text(
+                      '+157 EXP points gained!',
+                      style: TextStyle(
+                        color: colors.primary,
+                        fontSize: 20,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  const Spacer(flex: 3),
+                  if (!widget.returnToMapOnContinue)
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: List.generate(5, (index) {
+                        return Container(
+                          margin: const EdgeInsets.symmetric(horizontal: 4),
+                          height: 4,
+                          width: 40,
+                          decoration: BoxDecoration(
+                            color: index <= widget.testIndex
+                                ? colors.primary
+                                : colors.borderWeak,
+                            borderRadius: BorderRadius.circular(2),
+                          ),
+                        );
+                      }),
+                    ),
+                  const SizedBox(height: 32),
+                  CustomButton(
+                    text: widget.returnToMapOnContinue
+                        ? 'Back to levels'
+                        : (isLastTest ? 'Finish All Quizzes' : 'Next Quiz'),
+                    onPressed: () {
+                      if (widget.returnToMapOnContinue) {
+                        if (widget.didPass == true &&
+                            widget.sourceNodeId != null) {
+                          ref
+                              .read(mapUnlockProvider.notifier)
+                              .markPassed(widget.sourceNodeId!);
+                        }
+                        Navigator.of(context).pushAndRemoveUntil(
+                          MaterialPageRoute(
+                            builder: (_) => const MainNavigationScreen(),
+                            settings:
+                                const RouteSettings(name: AppRoutePaths.home),
+                          ),
+                          (route) => false,
+                        );
+                      } else if (isLastTest) {
+                        AppRouter.pushReplacement(
+                          context,
+                          const FinalResultsSummaryScreen(),
+                          routeName: AppRoutePaths.finalResults,
+                        );
+                      } else {
+                        AppRouter.push(
+                          context,
+                          TestDescriptionScreen(
+                              testIndex: widget.testIndex + 1),
+                          routeName: AppRoutePaths.testDescription,
+                        );
+                      }
+                    },
+                  ),
+                  const SizedBox(height: 40),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
