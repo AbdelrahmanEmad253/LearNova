@@ -27,6 +27,7 @@ Deno.serve(async (req: Request) => {
     assessment_id?: string;
     answers?: Record<string, string>;
     difficulty?: string;
+    client_submission_id?: string;
   };
   try {
     body = await req.json();
@@ -34,7 +35,7 @@ Deno.serve(async (req: Request) => {
     return respond({ error: "Invalid JSON body" }, 400);
   }
 
-  const { assessment_id, answers, difficulty } = body;
+  const { assessment_id, answers, difficulty, client_submission_id } = body;
 
   if (!assessment_id || typeof assessment_id !== "string") {
     return respond({ error: "assessment_id is required" }, 400);
@@ -44,6 +45,12 @@ Deno.serve(async (req: Request) => {
   }
   if (!difficulty || !VALID_DIFFICULTIES.includes(difficulty as Difficulty)) {
     return respond({ error: "difficulty must be 'easy', 'mid', or 'hard'" }, 400);
+  }
+  // NEW: client_submission_id is required so every submission can be
+  // de-duplicated. Flutter must generate one UUID per real attempt and
+  // resend the SAME value if a request needs to be retried.
+  if (!client_submission_id || typeof client_submission_id !== "string") {
+    return respond({ error: "client_submission_id is required" }, 400);
   }
 
   const chosenDifficulty = difficulty as Difficulty;
@@ -56,7 +63,7 @@ Deno.serve(async (req: Request) => {
   const clientForAuth = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     global: { headers: { Authorization: authHeader } },
   });
-  
+
   const { data: { user }, error: authError } = await clientForAuth.auth.getUser();
   if (authError || !user) {
     return respond({ error: "Unauthorized — invalid or expired token" }, 401);
@@ -64,6 +71,32 @@ Deno.serve(async (req: Request) => {
   const studentId = user.id;
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+
+  // ════════════════════════════════════════════════════════════
+  // NEW: Idempotency check.
+  // If a row already exists for this exact (user, client_submission_id)
+  // pair, this is a RETRY of a request we already fully processed —
+  // return the SAME result we already saved instead of re-scoring,
+  // re-inserting, or re-awarding XP.
+  // ════════════════════════════════════════════════════════════
+  const { data: existingSubmission } = await supabase
+    .from("student_module_attempts")
+    .select("score, passed, difficulty")
+    .eq("user_id", studentId)
+    .eq("client_submission_id", client_submission_id)
+    .maybeSingle();
+
+  if (existingSubmission) {
+    return respond(
+      {
+        score: existingSubmission.score,
+        passed: existingSubmission.passed,
+        difficulty: existingSubmission.difficulty,
+        duplicate_submission: true,
+      },
+      200,
+    );
+  }
 
   const { data: assessment, error: assessmentError } = await supabase
     .from("module_assessments")
@@ -113,12 +146,9 @@ Deno.serve(async (req: Request) => {
   if (streakData && streakData.current_streak_days > 0 && streakData.last_activity_date) {
     const lastActive = new Date(streakData.last_activity_date);
     const todayDate = new Date(todayDateStr);
-    
-    // Calculate difference in days using UTC boundaries
     const diffTime = todayDate.getTime() - lastActive.getTime();
     const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
 
-    // If active today or yesterday, streak is maintained
     if (diffDays <= 1) {
       streakMultiplier = 1.1;
     }
@@ -128,6 +158,13 @@ Deno.serve(async (req: Request) => {
   const FLAT_BASE_XP = 20;
   const xpAwarded = passed ? Math.round(FLAT_BASE_XP * streakMultiplier) : 0;
 
+  // ════════════════════════════════════════════════════════════
+  // NEW: client_submission_id saved alongside the attempt. The
+  // unique index (user_id, client_submission_id) from the migration
+  // means a true race (two near-simultaneous requests with the same
+  // ID) would have the SECOND insert fail here with a constraint
+  // violation — caught below and treated the same as a duplicate.
+  // ════════════════════════════════════════════════════════════
   const { error: insertError } = await supabase
     .from("student_module_attempts")
     .insert({
@@ -137,9 +174,32 @@ Deno.serve(async (req: Request) => {
       score:         score,
       passed:        passed,
       difficulty:    chosenDifficulty,
+      client_submission_id: client_submission_id,
     });
 
   if (insertError) {
+    if (insertError.code === "23505") {
+      // Unique violation on (user_id, client_submission_id) — a
+      // concurrent duplicate request beat us to the insert. Treat
+      // exactly like the idempotency check above: fetch and return
+      // the row that won, don't award XP twice.
+      const { data: wonRow } = await supabase
+        .from("student_module_attempts")
+        .select("score, passed, difficulty")
+        .eq("user_id", studentId)
+        .eq("client_submission_id", client_submission_id)
+        .maybeSingle();
+
+      return respond(
+        {
+          score: wonRow?.score ?? score,
+          passed: wonRow?.passed ?? passed,
+          difficulty: wonRow?.difficulty ?? chosenDifficulty,
+          duplicate_submission: true,
+        },
+        200,
+      );
+    }
     console.error("Insert error:", insertError);
     return respond({ error: "Failed to save attempt" }, 500);
   }
@@ -163,6 +223,7 @@ Deno.serve(async (req: Request) => {
     base_xp:         passed ? FLAT_BASE_XP : 0,
     streak_multiplier: streakMultiplier,
     xp_awarded:      xpAwarded,
+    duplicate_submission: false,
   }, 200);
 });
 
