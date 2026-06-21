@@ -2,25 +2,60 @@ from __future__ import annotations
 
 import os
 import re
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
 from services.supabase_client import supabase
-
+from mitchy.language_utils import has_arabic, normalize_for_intent
 
 STOPWORDS = {
-    "a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "do",
-    "does", "for", "from", "how", "i", "in", "into", "is", "it", "me",
-    "of", "on", "or", "that", "the", "this", "to", "what", "when",
-    "where", "which", "who", "why", "with", "you", "your", "am",
-    "explain", "tell", "about", "please", "simple", "simply",
+    "a", "an", "and", "are", "as", "at", "be", "but", "by", "can", "do", "does", "for", "from", "how", "i", "in", "into", "is", "it", "me", "of", "on", "or", "that", "the", "this", "to", "what", "when", "where", "which", "who", "why", "with", "you", "your", "am", "was", "were", "will", "would", "should", "could", "please", "simple", "simply", "tell", "about", "explain", "define", "meaning", "mean", "difference", "between", "example", "examples", "learn", "lesson", "topic", "module", "study", "start", "plan", "today", "free", "minutes", "next", "track", "progress", "rank", "xp", "badge", "badges", "perk", "perks", "job", "jobs", "career", "work",
 }
 
-RETRIEVAL_TRIGGERS = [
-    "what is", "what are", "explain", "define", "meaning of",
-    "difference between", "how does", "how do", "why does", "why do",
-    "example of",
+NON_RETRIEVAL_PATTERNS = [
+    r"\bwho\s+are\s+you\b", r"\bwhat\s+is\s+your\s+name\b", r"\bcan\s+you\s+speak\b", r"\barabic\b",
+    r"\bwhat\s+should\s+i\b", r"\bwhat\s+to\s+study\b", r"\bstart\s+with\b", r"\broadmap\b", r"\bplan\b",
+    r"\bmy\s+(rank|xp|badges?|perks?|track|progress)\b", r"\bnext\s+(level|badge|milestone|topic|module)\b",
+    r"\bcareer\b", r"\bjobs?\b", r"\bwhere\s+can\s+i\s+work\b", r"\bafter\s+.*track\b", r"\bcv\b", r"\bproject\b",
+    r"\bsame\s+(thing|concept|answer)\b", r"\bin\s+(arabic|english)\b", r"\bcompare\b", r"\bboth\b", r"\bit\b", r"\bthat\b", r"\bagain\b",
+    r"نفس", r"الاتنين", r"قارن", r"الفرق", r"بالعربي", r"بالانجليزي", r"بالإنجليزي",
 ]
+
+BAD_LOW_CONTEXT_PHRASES = [
+    "check out", "join our", "reference page", "coding game", "follow me", "linkedin", "subscribe", "like and", "download the", "digital version", "reach out to me", "what is up everyone", "hey what is up", "love but yeah", "um the", "uh you", "sort of",
+]
+
+
+def _enabled() -> bool:
+    return os.getenv("MITCHY_DOCUMENT_RETRIEVAL_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _global_enabled() -> bool:
+    # Global keyword retrieval is disabled by default because the KB contains long
+    # transcripts and can otherwise return unrelated snippets. Use provider/basic
+    # concept logic for dashboard/global questions.
+    return os.getenv("MITCHY_DOCUMENT_RETRIEVAL_GLOBAL_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _limit() -> int:
+    try:
+        return max(1, min(int(os.getenv("MITCHY_DOCUMENT_RETRIEVAL_LIMIT", "5")), 10))
+    except Exception:
+        return 5
+
+
+def _topic_min_score() -> int:
+    try:
+        return max(1, int(os.getenv("MITCHY_DOCUMENT_RETRIEVAL_TOPIC_MIN_SCORE", "1")))
+    except Exception:
+        return 1
+
+
+def _global_min_score() -> int:
+    try:
+        return max(4, int(os.getenv("MITCHY_DOCUMENT_RETRIEVAL_GLOBAL_MIN_SCORE", "6")))
+    except Exception:
+        return 6
 
 
 def _is_uuid(value: Optional[str]) -> bool:
@@ -33,182 +68,138 @@ def _is_uuid(value: Optional[str]) -> bool:
         return False
 
 
-def _enabled() -> bool:
-    return os.getenv("MITCHY_DOCUMENT_RETRIEVAL_ENABLED", "true").lower() not in {"0", "false", "no"}
-
-
-def _limit() -> int:
-    try:
-        return max(1, min(int(os.getenv("MITCHY_DOCUMENT_RETRIEVAL_LIMIT", "5")), 10))
-    except Exception:
-        return 5
-
-
-def _min_score() -> int:
-    try:
-        return max(1, int(os.getenv("MITCHY_DOCUMENT_RETRIEVAL_MIN_SCORE", "1")))
-    except Exception:
-        return 1
+def _normalize_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
 def _keywords(message: str) -> List[str]:
-    words = re.findall(r"[a-zA-Z][a-zA-Z0-9_+#.-]{1,}", message.lower())
-    keywords = [word for word in words if word not in STOPWORDS and len(word) >= 2]
-
-    seen = set()
-    result = []
+    text = normalize_for_intent(message).lower()
+    words = re.findall(r"[a-zA-Z][a-zA-Z0-9_+#.-]*", text)
+    keywords = [word.strip(".-_") for word in words if word not in STOPWORDS and len(word) >= 3]
+    normalized: List[str] = []
     for word in keywords:
-        if word not in seen:
-            seen.add(word)
-            result.append(word)
-
-    return result[:8]
+        if word and word not in normalized:
+            normalized.append(word)
+    return normalized[:8]
 
 
-def _looks_like_course_question(message: str) -> bool:
-    text = message.lower().strip()
+def _is_non_retrieval_message(message: str) -> bool:
+    text = normalize_for_intent(message).lower()
+    return any(re.search(pattern, text) for pattern in NON_RETRIEVAL_PATTERNS)
 
-    if "?" in text:
-        return True
 
-    return any(trigger in text for trigger in RETRIEVAL_TRIGGERS)
+def _should_attempt_retrieval(message: str, topic_id: Optional[str], screen_context: Optional[str]) -> Tuple[bool, str, List[str]]:
+    clean_message = _normalize_text(message)
+    keywords = _keywords(clean_message)
+    has_topic_context = bool(topic_id and _is_uuid(topic_id))
+
+    if not _enabled():
+        return False, "retrieval_disabled", keywords
+    if not clean_message:
+        return False, "empty_message", keywords
+    if has_arabic(clean_message) and not has_topic_context:
+        return False, "arabic_global_query_uses_provider_or_local_handlers", keywords
+    if _is_non_retrieval_message(clean_message):
+        return False, "non_retrieval_intent", keywords
+    if not keywords:
+        return False, "no_keywords", keywords
+
+    if has_topic_context:
+        return True, "topic_context", keywords
+
+    if not _global_enabled():
+        return False, "global_retrieval_disabled_to_prevent_noisy_transcript_matches", keywords
+
+    if len(keywords) < 3:
+        return False, "global_query_too_short", keywords
+
+    return True, "global_retrieval_explicitly_enabled", keywords
 
 
 def _fetch_candidates(keyword: str, topic_id: Optional[str], limit: int) -> List[Dict[str, Any]]:
-    query = (
-        supabase.table("document_chunks")
-        .select("id, topic_id, content, metadata, inserted_at")
-        .ilike("content", f"%{keyword}%")
-        .limit(limit)
-    )
-
+    query = supabase.table("document_chunks").select("id, topic_id, content, metadata, inserted_at").ilike("content", f"%{keyword}%").limit(limit)
     if topic_id and _is_uuid(topic_id):
         query = query.eq("topic_id", topic_id)
-
-    response = query.execute()
-    rows = response.data or []
-
+    rows = query.execute().data or []
     return rows if isinstance(rows, list) else []
 
 
-def _score_row(row: Dict[str, Any], keywords: List[str]) -> int:
+def _is_noisy(content: str) -> bool:
+    lowered = content.lower()
+    return any(phrase in lowered for phrase in BAD_LOW_CONTEXT_PHRASES)
+
+
+def _score_row(row: Dict[str, Any], keywords: List[str], topic_id: Optional[str]) -> int:
     content = str(row.get("content") or "").lower()
+    if _is_noisy(content):
+        return -100
     metadata = row.get("metadata") or {}
     if not isinstance(metadata, dict):
         metadata = {}
-
     haystack = content + " " + " ".join(str(v).lower() for v in metadata.values() if v is not None)
+    score = sum(1 for kw in keywords if kw in haystack)
+    if topic_id and _is_uuid(topic_id) and row.get("topic_id") == topic_id:
+        score += 2
+    return score
 
-    return sum(1 for keyword in keywords if keyword in haystack)
 
+def _best_rows(message: str, topic_id: Optional[str], screen_context: Optional[str]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    should_retrieve, reason, keywords = _should_attempt_retrieval(message, topic_id, screen_context)
+    debug = {"retrieval_gate_reason": reason, "keywords": keywords}
+    if not should_retrieve:
+        return [], debug
 
-def _best_rows(message: str, topic_id: Optional[str]) -> List[Dict[str, Any]]:
-    keywords = _keywords(message)
-
-    if not keywords:
-        return []
-
-    limit = _limit()
     candidate_map: Dict[str, Dict[str, Any]] = {}
+    limit = _limit()
+    for keyword in keywords[:4]:
+        for row in _fetch_candidates(keyword, topic_id=topic_id if _is_uuid(topic_id) else None, limit=limit * 4):
+            candidate_map[str(row.get("id"))] = row
 
-    if topic_id and _is_uuid(topic_id):
-        for keyword in keywords[:3]:
-            for row in _fetch_candidates(keyword, topic_id=topic_id, limit=limit * 2):
-                candidate_map[str(row.get("id"))] = row
-
-    if not candidate_map:
-        for keyword in keywords[:4]:
-            for row in _fetch_candidates(keyword, topic_id=None, limit=limit * 2):
-                candidate_map[str(row.get("id"))] = row
-
-    scored = []
+    min_score = _topic_min_score() if topic_id and _is_uuid(topic_id) else _global_min_score()
+    scored: List[Tuple[int, Dict[str, Any]]] = []
     for row in candidate_map.values():
-        score = _score_row(row, keywords)
-        if score >= _min_score():
-            scored.append((score, row))
+        score = _score_row(row, keywords, topic_id)
+        if score >= min_score:
+            enriched = dict(row)
+            enriched["_retrieval_score"] = score
+            scored.append((score, enriched))
 
     scored.sort(key=lambda item: item[0], reverse=True)
+    debug.update({"candidate_count": len(candidate_map), "accepted_count": len(scored), "min_score": min_score})
+    return [row for _, row in scored[:limit]], debug
 
-    return [row for _, row in scored[:limit]]
 
-
-def _summarize(rows: List[Dict[str, Any]], message: str) -> str:
-    snippets: List[str] = []
-
-    for row in rows[:3]:
-        content = re.sub(r"\s+", " ", str(row.get("content") or "")).strip()
-        if not content:
-            continue
-
-        sentences = re.split(r"(?<=[.!?])\s+", content)
-        selected = " ".join(sentences[:3]).strip()
-
-        if len(selected) > 550:
-            selected = selected[:547].rstrip() + "..."
-
-        if selected:
-            snippets.append(selected)
-
-    if not snippets:
+def _select_relevant_sentences(content: str, keywords: List[str], max_sentences: int = 3) -> str:
+    content = re.sub(r"\s+", " ", content).strip()
+    if not content or _is_noisy(content):
         return ""
-
-    answer = snippets[0]
-
-    if len(snippets) > 1:
-        answer += "\n\nRelated note: " + snippets[1]
-
+    sentences = re.split(r"(?<=[.!?])\s+", content)
+    selected: List[str] = []
+    for sentence in sentences:
+        lowered = sentence.lower()
+        if any(keyword in lowered for keyword in keywords) and not _is_noisy(sentence):
+            selected.append(sentence.strip())
+        if len(selected) >= max_sentences:
+            break
+    answer = " ".join(selected).strip()
+    if len(answer) > 520:
+        answer = answer[:517].rstrip() + "..."
     return answer
 
 
-def answer_from_document_chunks(
-    *,
-    message: str,
-    topic_id: Optional[str] = None,
-) -> Optional[Dict[str, Any]]:
-    """
-    Answers simple educational questions from document_chunks before Gemini.
-
-    This is intentionally simple and DB-first. It does not require embeddings/RPC.
-    """
-
-    if not _enabled():
-        return None
-
+def answer_from_document_chunks(*, message: str, topic_id: Optional[str] = None, screen_context: Optional[str] = None) -> Optional[Dict[str, Any]]:
     clean_message = str(message or "").strip()
-
-    if not clean_message or not _looks_like_course_question(clean_message):
-        return None
-
-    try:
-        rows = _best_rows(clean_message, topic_id=topic_id)
-    except Exception as exc:
-        return {
-            "response_text": (
-                "I tried to check the course material, but I could not read it right now. "
-                "Let’s still break the question down simply."
-            ),
-            "learning_state": "confused",
-            "sentiment_score": 0.0,
-            "cognitive_load": 0.3,
-            "suggested_action": "rescue_explanation",
-            "recommended_format": "textual",
-            "recommended_format_db": "Textual",
-            "confidence": 0.35,
-            "metadata": {
-                "source": "document_chunks_retrieval_error",
-                "used_gemini": False,
-                "retrieval_error": str(exc),
-            },
-        }
-
+    rows, debug = _best_rows(clean_message, topic_id=topic_id, screen_context=screen_context)
     if not rows:
         return None
-
-    answer = _summarize(rows, clean_message)
-
+    keywords = _keywords(clean_message)
+    answer = ""
+    for row in rows[:3]:
+        answer = _select_relevant_sentences(_normalize_text(row.get("content")), keywords)
+        if answer:
+            break
     if not answer:
         return None
-
     return {
         "response_text": answer,
         "learning_state": "curious_inquiry",
@@ -217,21 +208,19 @@ def answer_from_document_chunks(
         "suggested_action": "answer_question",
         "recommended_format": "textual",
         "recommended_format_db": "Textual",
-        "confidence": 0.72,
+        "confidence": 0.74,
         "metadata": {
             "source": "document_chunks_retrieval",
             "used_gemini": False,
             "topic_id": topic_id,
+            **debug,
             "matched_chunks": [
                 {
                     "id": row.get("id"),
                     "topic_id": row.get("topic_id"),
-                    "chunk_id": (row.get("metadata") or {}).get("chunk_id")
-                    if isinstance(row.get("metadata"), dict)
-                    else None,
-                    "topic_key": (row.get("metadata") or {}).get("topic_key")
-                    if isinstance(row.get("metadata"), dict)
-                    else None,
+                    "score": row.get("_retrieval_score"),
+                    "chunk_id": (row.get("metadata") or {}).get("chunk_id") if isinstance(row.get("metadata"), dict) else None,
+                    "topic_key": (row.get("metadata") or {}).get("topic_key") if isinstance(row.get("metadata"), dict) else None,
                 }
                 for row in rows[:3]
             ],
