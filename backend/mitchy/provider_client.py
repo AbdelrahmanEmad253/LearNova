@@ -18,21 +18,57 @@ def _timeout_seconds() -> int:
         return DEFAULT_TIMEOUT_SECONDS
 
 
+def _normalize_provider_name(provider: str) -> str:
+    provider = provider.strip().lower()
+    aliases = {
+        "grok": "xai",
+        "nara": "nararouter",
+        "naraya": "nararouter",
+        "nara-router": "nararouter",
+        "nara_router": "nararouter",
+    }
+    return aliases.get(provider, provider)
+
+
 def _provider_order() -> list[str]:
-    raw = os.getenv("MITCHY_PROVIDER_ORDER", "github,groq,gemini,openrouter,xai")
+    """
+    Mitchy-specific order wins if configured.
+    Otherwise, fall back to the shared AI_PROVIDER_ORDER used by scoring.
+    """
+    raw = (
+        os.getenv("MITCHY_PROVIDER_ORDER")
+        or os.getenv("AI_PROVIDER_ORDER")
+        or "nararouter,groq,gemini,openrouter,xai"
+    )
     providers: list[str] = []
     for item in raw.split(","):
-        provider = item.strip().lower()
+        provider = _normalize_provider_name(item)
         if not provider:
             continue
-        if provider == "grok":
-            provider = "xai"
         if provider not in providers:
             providers.append(provider)
     return providers
 
 
-def _http_json_post(*, url: str, headers: Dict[str, str], payload: Dict[str, Any], timeout_seconds: int) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
+def _chat_completions_url(base_or_full_url: str) -> str:
+    """
+    Accepts either:
+    - https://router.naraya.ai/v1
+    - https://router.naraya.ai/v1/chat/completions
+    """
+    url = base_or_full_url.rstrip("/")
+    if url.endswith("/chat/completions"):
+        return url
+    return f"{url}/chat/completions"
+
+
+def _http_json_post(
+    *,
+    url: str,
+    headers: Dict[str, str],
+    payload: Dict[str, Any],
+    timeout_seconds: int,
+) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     default_headers = {
         "Content-Type": "application/json",
@@ -67,22 +103,46 @@ def _extract_openai_compatible_text(data: Optional[Dict[str, Any]]) -> Optional[
     return None
 
 
-def _call_openai_compatible(*, provider: str, url: str, api_key: str, model: str, prompt: str, extra_headers: Optional[Dict[str, str]] = None) -> Tuple[Optional[str], Optional[str]]:
+def _call_openai_compatible(
+    *,
+    provider: str,
+    url: str,
+    api_key: str,
+    model: str,
+    prompt: str,
+    extra_headers: Optional[Dict[str, str]] = None,
+) -> Tuple[Optional[str], Optional[str]]:
     headers = {"Authorization": f"Bearer {api_key}"}
     if extra_headers:
         headers.update(extra_headers)
+
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": "You are Mitchy, LearNova's virtual Learning Assistant. Follow the user-context and output-contract inside the user prompt. Answer directly when the user's question is clear. Do not greet unless the user only greeted you."},
+            {
+                "role": "system",
+                "content": (
+                    "You are Mitchy, LearNova's virtual Learning Assistant. "
+                    "Follow the user-context and output-contract inside the user prompt. "
+                    "Answer directly when the user's question is clear. "
+                    "Do not greet unless the user only greeted you."
+                ),
+            },
             {"role": "user", "content": prompt},
         ],
         "temperature": float(os.getenv("MITCHY_PROVIDER_TEMPERATURE", "0.25")),
         "max_tokens": int(os.getenv("MITCHY_PROVIDER_MAX_TOKENS", "900")),
     }
-    data, error = _http_json_post(url=url, headers=headers, payload=payload, timeout_seconds=_timeout_seconds())
+
+    data, error = _http_json_post(
+        url=url,
+        headers=headers,
+        payload=payload,
+        timeout_seconds=_timeout_seconds(),
+    )
     if error:
         return None, f"{provider}: {error}"
+
     text = _extract_openai_compatible_text(data)
     if not text:
         return None, f"{provider}: empty response"
@@ -96,11 +156,65 @@ def _call_generic_openai(prompt: str) -> Tuple[Optional[str], Optional[str]]:
     model = os.getenv("AI_MODEL")
     if not (base_url and api_key and model):
         return None, "primary: AI_BASE_URL/AI_API_KEY/AI_MODEL not fully configured"
-    url = base_url.rstrip("/")
-    if not url.endswith("/chat/completions"):
-        url = f"{url}/chat/completions"
-    return _call_openai_compatible(provider="primary", url=url, api_key=api_key, model=model, prompt=prompt)
 
+    return _call_openai_compatible(
+        provider="primary",
+        url=_chat_completions_url(base_url),
+        api_key=api_key,
+        model=model,
+        prompt=prompt,
+    )
+
+
+def _call_nararouter(prompt: str) -> Tuple[Optional[str], Optional[str]]:
+    """
+    NaraRouter / Naraya Router provider.
+
+    Required Railway env:
+    - NARAROUTER_API_KEY
+    - NARAROUTER_BASE_URL or NARAROUTER_API_ENDPOINT
+    - NARAROUTER_MODEL
+
+    Optional Mitchy-specific model override:
+    - MITCHY_NARAROUTER_MODEL or NARAROUTER_MITCHY_MODEL
+    """
+    api_key = (
+        os.getenv("NARAROUTER_API_KEY")
+        or os.getenv("NARA_API_KEY")
+        or os.getenv("NARAYA_API_KEY")
+    )
+    if not api_key:
+        return None, "nararouter: NARAROUTER_API_KEY is not configured"
+
+    model = (
+        os.getenv("MITCHY_NARAROUTER_MODEL")
+        or os.getenv("NARAROUTER_MITCHY_MODEL")
+        or os.getenv("NARAROUTER_MODEL")
+        or "claude-sonnet-4.5"
+    )
+    base_url = (
+        os.getenv("NARAROUTER_BASE_URL")
+        or os.getenv("NARAROUTER_API_ENDPOINT")
+        or os.getenv("NARAROUTER_ENDPOINT")
+        or "https://router.naraya.ai/v1"
+    )
+
+    headers: Dict[str, str] = {}
+    site_url = os.getenv("NARAROUTER_SITE_URL")
+    app_name = os.getenv("NARAROUTER_APP_NAME", "LearNova Mitchy")
+    if site_url:
+        headers["HTTP-Referer"] = site_url
+    if app_name:
+        headers["X-Title"] = app_name
+
+    return _call_openai_compatible(
+        provider="nararouter",
+        url=_chat_completions_url(base_url),
+        api_key=api_key,
+        model=model,
+        prompt=prompt,
+        extra_headers=headers,
+    )
 
 
 def _call_github_models(prompt: str) -> Tuple[Optional[str], Optional[str]]:
@@ -114,17 +228,27 @@ def _call_github_models(prompt: str) -> Tuple[Optional[str], Optional[str]]:
         return None, "github: GITHUB_MODELS_API_KEY/GITHUB_TOKEN is not configured"
     model = os.getenv("GITHUB_MODEL", "openai/gpt-5-mini")
     base_url = os.getenv("GITHUB_MODELS_BASE_URL", "https://models.github.ai/inference")
-    url = base_url.rstrip("/")
-    if not url.endswith("/chat/completions"):
-        url = f"{url}/chat/completions"
-    return _call_openai_compatible(provider="github", url=url, api_key=api_key, model=model, prompt=prompt)
+    return _call_openai_compatible(
+        provider="github",
+        url=_chat_completions_url(base_url),
+        api_key=api_key,
+        model=model,
+        prompt=prompt,
+    )
+
 
 def _call_groq(prompt: str) -> Tuple[Optional[str], Optional[str]]:
     api_key = os.getenv("GROQ_API_KEY")
     if not api_key:
         return None, "groq: GROQ_API_KEY is not configured"
     model = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
-    return _call_openai_compatible(provider="groq", url="https://api.groq.com/openai/v1/chat/completions", api_key=api_key, model=model, prompt=prompt)
+    return _call_openai_compatible(
+        provider="groq",
+        url="https://api.groq.com/openai/v1/chat/completions",
+        api_key=api_key,
+        model=model,
+        prompt=prompt,
+    )
 
 
 def _call_openrouter(prompt: str) -> Tuple[Optional[str], Optional[str]]:
@@ -139,7 +263,14 @@ def _call_openrouter(prompt: str) -> Tuple[Optional[str], Optional[str]]:
         headers["HTTP-Referer"] = site_url
     if app_name:
         headers["X-Title"] = app_name
-    return _call_openai_compatible(provider="openrouter", url="https://openrouter.ai/api/v1/chat/completions", api_key=api_key, model=model, prompt=prompt, extra_headers=headers)
+    return _call_openai_compatible(
+        provider="openrouter",
+        url="https://openrouter.ai/api/v1/chat/completions",
+        api_key=api_key,
+        model=model,
+        prompt=prompt,
+        extra_headers=headers,
+    )
 
 
 def _call_xai(prompt: str) -> Tuple[Optional[str], Optional[str]]:
@@ -147,7 +278,14 @@ def _call_xai(prompt: str) -> Tuple[Optional[str], Optional[str]]:
     if not api_key:
         return None, "xai: XAI_API_KEY/GROK_API_KEY is not configured"
     model = os.getenv("XAI_MODEL", os.getenv("GROK_MODEL", "grok-3-mini"))
-    return _call_openai_compatible(provider="xai", url=os.getenv("XAI_API_URL", "https://api.x.ai/v1/chat/completions"), api_key=api_key, model=model, prompt=prompt)
+    base_url = os.getenv("XAI_BASE_URL") or os.getenv("XAI_API_URL") or "https://api.x.ai/v1"
+    return _call_openai_compatible(
+        provider="xai",
+        url=_chat_completions_url(base_url),
+        api_key=api_key,
+        model=model,
+        prompt=prompt,
+    )
 
 
 def _call_gemini(prompt: str) -> Tuple[Optional[str], Optional[str]]:
@@ -164,6 +302,9 @@ def call_backup_provider(prompt: str) -> Tuple[Optional[str], Optional[str], Opt
         if provider in {"primary", "generic"}:
             text, error = _call_generic_openai(prompt)
             provider_name = "primary"
+        elif provider == "nararouter":
+            text, error = _call_nararouter(prompt)
+            provider_name = "nararouter"
         elif provider == "github":
             text, error = _call_github_models(prompt)
             provider_name = "github"
@@ -176,14 +317,16 @@ def call_backup_provider(prompt: str) -> Tuple[Optional[str], Optional[str], Opt
         elif provider == "openrouter":
             text, error = _call_openrouter(prompt)
             provider_name = "openrouter"
-        elif provider in {"xai", "grok"}:
+        elif provider == "xai":
             text, error = _call_xai(prompt)
             provider_name = "xai"
         else:
             errors.append(f"{provider}: unsupported provider")
             continue
+
         if text:
             return text, provider_name, None
         if error:
             errors.append(error)
+
     return None, None, " | ".join(errors) if errors else "No providers configured"
