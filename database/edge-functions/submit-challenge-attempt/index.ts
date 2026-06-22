@@ -14,6 +14,14 @@
 //      matching the next week number for the same track.
 // Everything else (auth, scoring, streak multiplier, XP, attempt insert)
 // is unchanged from the existing implementation.
+//
+// BUG FIX (answers shape normalization):
+// The Flutter app sends answers as:
+//   { answers: [{ question_id, selected_index, selected_label }, ...] }
+// where selected_label is a string like "B) Surveying only morning customers".
+// The edge function previously expected a flat map { question_id: "B" }.
+// normalizeAnswers() detects which shape arrived and converts Flutter's
+// shape to the flat map before scoring — so both shapes now work correctly.
 // ============================================================
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -24,6 +32,38 @@ const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 
 const VALID_DIFFICULTIES = ["easy", "mid", "hard"] as const;
 type Difficulty = typeof VALID_DIFFICULTIES[number];
+
+// ── Answer shape normalization ─────────────────────────────
+// Accepts either:
+//   Flat shape:   { "question-uuid": "B", ... }
+//   Flutter shape: { answers: [{ question_id, selected_label: "B) Some text" }, ...] }
+// Always returns a flat { question-uuid: "B" } map for scoring.
+function normalizeAnswers(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== "object") return {};
+
+  const asObj = raw as Record<string, unknown>;
+
+  // Flutter shape: top-level key is "answers" and its value is an array
+  if (Array.isArray(asObj.answers)) {
+    const flat: Record<string, string> = {};
+    for (const entry of asObj.answers) {
+      if (!entry || typeof entry !== "object") continue;
+      const { question_id, selected_label } = entry as Record<string, unknown>;
+      if (typeof question_id !== "string" || typeof selected_label !== "string") continue;
+      // selected_label is "B) Surveying only morning customers" → extract "B"
+      const letter = selected_label.split(")")[0].trim();
+      if (letter) flat[question_id] = letter;
+    }
+    return flat;
+  }
+
+  // Flat shape: already { question_id: "B" }
+  const flat: Record<string, string> = {};
+  for (const [k, v] of Object.entries(asObj)) {
+    if (typeof v === "string") flat[k] = v;
+  }
+  return flat;
+}
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
@@ -41,7 +81,7 @@ Deno.serve(async (req: Request) => {
 
   let body: {
     challenge_id?: string;
-    answers?: Record<string, string>;
+    answers?: unknown;
     difficulty?: string;
     timezone_offset?: number;
   };
@@ -51,13 +91,16 @@ Deno.serve(async (req: Request) => {
     return respond({ error: "Invalid JSON body" }, 400);
   }
 
-  const { challenge_id, answers, difficulty, timezone_offset = 0 } = body;
+  const { challenge_id, answers: rawAnswers, difficulty, timezone_offset = 0 } = body;
 
   if (!challenge_id) return respond({ error: "challenge_id is required" }, 400);
-  if (!answers) return respond({ error: "answers must be an object" }, 400);
+  if (!rawAnswers) return respond({ error: "answers must be an object" }, 400);
   if (!difficulty || !VALID_DIFFICULTIES.includes(difficulty as Difficulty)) {
     return respond({ error: "Invalid difficulty tier" }, 400);
   }
+
+  // Normalize to flat map before anything else touches answers
+  const answers = normalizeAnswers(rawAnswers);
 
   const authHeader = req.headers.get("Authorization");
   if (!authHeader) return respond({ error: "Missing Authorization" }, 401);
@@ -141,6 +184,7 @@ Deno.serve(async (req: Request) => {
   const earnedXp = Math.round(baseXp * (score / 100));
   const finalXpAwarded = Math.round(earnedXp * streakMultiplier);
 
+  // Store the normalized flat map — consistent shape in DB regardless of client
   const { error: insertError } = await supabase.from("student_challenge_attempts").insert({
     user_id: studentId,
     challenge_id: challenge_id,
