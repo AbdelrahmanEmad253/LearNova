@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import sys
@@ -17,6 +17,7 @@ Reads:
 
 Writes:
 - in_app_notifications for admin users, using notification_type='general'
+- leaderboard_snapshots through RPC refresh_leaderboard_snapshots()
 
 This avoids creating a new daily_briefings table for now.
 """
@@ -44,6 +45,13 @@ def parse_metric_date(raw: Optional[str]) -> date:
         return date.fromisoformat(raw)
 
     return (utc_now() - timedelta(days=1)).date()
+
+
+def parse_snapshot_date(raw: Optional[str]) -> date:
+    if raw:
+        return date.fromisoformat(raw)
+
+    return utc_now().date()
 
 
 def safe_float(value: Any, default: float = 0.0) -> float:
@@ -94,7 +102,7 @@ def generate_daily_briefing(metric_date: date, metrics: List[Dict[str, Any]]) ->
     if not metrics:
         return {
             "briefing": (
-                f"LearNova Daily Insight â€” {metric_date.isoformat()}\n"
+                f"LearNova Daily Insight — {metric_date.isoformat()}\n"
                 "- No ML daily metrics were found for this date.\n"
                 "- Run the ML pipeline first or check whether students had activity.\n"
                 "- No admin action is required yet."
@@ -128,7 +136,7 @@ def generate_daily_briefing(metric_date: date, metrics: List[Dict[str, Any]]) ->
     )
 
     briefing = (
-        f"LearNova Daily Insight â€” {metric_date.isoformat()}\n"
+        f"LearNova Daily Insight — {metric_date.isoformat()}\n"
         f"- Engagement: average engagement velocity is {avg_engagement:.2f}; "
         f"{low_engagement_count} student(s) had low engagement.\n"
         f"- Struggle: average topic struggle index is {avg_struggle:.2f}; "
@@ -171,7 +179,7 @@ def save_admin_notifications(metric_date: date, result: Dict[str, Any]) -> Dict[
         rows.append(
             {
                 "user_id": admin["id"],
-                "title": f"LearNova Daily Insight â€” {metric_date.isoformat()}",
+                "title": f"LearNova Daily Insight — {metric_date.isoformat()}",
                 "body": result["briefing"],
                 "notification_type": "general",
                 "is_read": False,
@@ -194,21 +202,56 @@ def save_admin_notifications(metric_date: date, result: Dict[str, Any]) -> Dict[
     }
 
 
-def generate_and_validate_daily_briefing(metric_date: Optional[date] = None, save: bool = True) -> Dict[str, Any]:
+def refresh_leaderboard_snapshots(snapshot_date: Optional[date] = None) -> Dict[str, Any]:
+    """
+    Write/update the historical leaderboard snapshot for one date.
+
+    The live leaderboard should still read from student_profiles.xp_total.
+    This RPC only stores a daily historical copy in leaderboard_snapshots.
+    """
+    snapshot_date = snapshot_date or utc_now().date()
+
+    response = supabase.rpc(
+        "refresh_leaderboard_snapshots",
+        {"p_snapshot_date": snapshot_date.isoformat()},
+    ).execute()
+
+    data = response.data
+    if isinstance(data, dict):
+        return data
+
+    return {
+        "ok": True,
+        "snapshot_date": snapshot_date.isoformat(),
+        "rpc_result": data,
+    }
+
+
+def generate_and_validate_daily_briefing(
+    metric_date: Optional[date] = None,
+    save: bool = True,
+    snapshot_leaderboard: bool = True,
+    snapshot_date: Optional[date] = None,
+) -> Dict[str, Any]:
     metric_date = metric_date or parse_metric_date(None)
     metrics = fetch_metrics(metric_date)
     result = generate_daily_briefing(metric_date, metrics)
 
     save_result = None
+    leaderboard_snapshot_result = None
 
     if save:
         save_result = save_admin_notifications(metric_date, result)
+
+    if snapshot_leaderboard:
+        leaderboard_snapshot_result = refresh_leaderboard_snapshots(snapshot_date)
 
     return {
         "ok": True,
         "metric_date": metric_date.isoformat(),
         "result": result,
         "save_result": save_result,
+        "leaderboard_snapshot_result": leaderboard_snapshot_result,
     }
 
 
@@ -216,12 +259,28 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", help="Metric date in YYYY-MM-DD. Defaults to yesterday UTC.")
     parser.add_argument("--no-save", action="store_true", help="Generate but do not insert admin notifications.")
+    parser.add_argument(
+        "--no-leaderboard-snapshot",
+        action="store_true",
+        help="Do not refresh leaderboard_snapshots.",
+    )
+    parser.add_argument(
+        "--snapshot-date",
+        help="Leaderboard snapshot date in YYYY-MM-DD. Defaults to today UTC.",
+    )
     args = parser.parse_args()
 
     metric_date = parse_metric_date(args.date)
-    result = generate_and_validate_daily_briefing(metric_date=metric_date, save=not args.no_save)
+    snapshot_date = parse_snapshot_date(args.snapshot_date)
 
-    print(result)
+    result = generate_and_validate_daily_briefing(
+        metric_date=metric_date,
+        save=not args.no_save,
+        snapshot_leaderboard=not args.no_leaderboard_snapshot,
+        snapshot_date=snapshot_date,
+    )
+
+    print(result, flush=True)
 
 
 if __name__ == "__main__":
