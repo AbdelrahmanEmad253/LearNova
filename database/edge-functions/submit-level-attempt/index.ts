@@ -3,12 +3,20 @@
 // The ML-AI Railway service grades the written answers first and writes
 // score/passed/mitchy_feedback/grade_breakdown to student_level_attempts.
 // This function is idempotent: repeated calls do not award XP twice.
+//
+// CHANGE LOG (this update):
+// Updated to "No-Webhook" architecture. If an attempt is ungraded, the
+// function now pings Railway's /score/level-attempt endpoint directly,
+// waits for Railway to grade the attempt, then refetches and continues
+// with XP + badge processing. The old 409 "not graded yet" guard is gone.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
 const SUPABASE_SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
 const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
+const LEVEL_GRADER_URL = Deno.env.get("LEVEL_GRADER_URL");
+const LEVEL_GRADER_API_KEY = Deno.env.get("LEVEL_GRADER_API_KEY");
 
 const BADGE_SCORE_THRESHOLD = 90;
 const DIFFICULTY_TO_METAL: Record<string, string> = { easy: "bronze", mid: "silver", hard: "gold" };
@@ -34,7 +42,7 @@ Deno.serve(async (req: Request) => {
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
-  const { data: attempt, error: attemptError } = await supabase
+  let { data: attempt, error: attemptError } = await supabase
     .from("student_level_attempts")
     .select("id, user_id, assessment_id, score, passed, difficulty, reward_processed_at, xp_awarded")
     .eq("id", body.attempt_id)
@@ -42,8 +50,42 @@ Deno.serve(async (req: Request) => {
 
   if (attemptError || !attempt) return respond({ error: "Attempt not found" }, 404);
   if (attempt.user_id !== user.id) return respond({ error: "Forbidden" }, 403);
+
   if (attempt.score === null || attempt.score === undefined || attempt.passed === null || attempt.passed === undefined) {
-    return respond({ error: "Attempt has not been graded yet", graded: false }, 409);
+    // 1. Verify Scoring Environment Variables
+    if (!LEVEL_GRADER_URL || !LEVEL_GRADER_API_KEY) {
+      return respond({ error: "Scoring service environment variables are missing" }, 500);
+    }
+
+    // 2. Format Railway URL
+    const railwayBaseUrl = LEVEL_GRADER_URL.replace(/\/$/, "");
+    const railwayUrl = `${railwayBaseUrl}/score/level-attempt`;
+
+    // 3. Ping Railway to Grade the Attempt
+    const railwayResponse = await fetch(railwayUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-api-key": LEVEL_GRADER_API_KEY },
+      body: JSON.stringify({ attempt_id: attempt.id }),
+    });
+
+    if (!railwayResponse.ok) {
+      const text = await railwayResponse.text();
+      return respond({ error: `Railway scoring failed: ${text}` }, 500);
+    }
+
+    // 4. Refetch the newly graded attempt from Supabase
+    const { data: gradedAttempt, error: gradedAttemptError } = await supabase
+      .from("student_level_attempts")
+      .select("id, user_id, assessment_id, score, passed, difficulty, reward_processed_at, xp_awarded")
+      .eq("id", attempt.id)
+      .single();
+
+    if (gradedAttemptError || !gradedAttempt) {
+      return respond({ error: "Failed to reload graded attempt" }, 500);
+    }
+
+    // 5. Update the local variable so XP processing can continue
+    attempt = gradedAttempt;
   }
 
   // Atomic idempotency claim: prevents duplicate XP if Flutter retries.
