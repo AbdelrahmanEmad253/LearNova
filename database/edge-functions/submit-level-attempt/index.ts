@@ -57,12 +57,8 @@ Deno.serve(async (req: Request) => {
       return respond({ error: "Scoring service environment variables are missing" }, 500);
     }
 
-    // 2. Format Railway URL
-    const railwayBaseUrl = LEVEL_GRADER_URL.replace(/\/$/, "");
-    const railwayUrl = `${railwayBaseUrl}/score/level-attempt`;
-
-    // 3. Ping Railway to Grade the Attempt
-    const railwayResponse = await fetch(railwayUrl, {
+    // 2. Ping Railway to Grade the Attempt using the exact URL provided in the environment variable
+    const railwayResponse = await fetch(LEVEL_GRADER_URL as string, {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-api-key": LEVEL_GRADER_API_KEY },
       body: JSON.stringify({ attempt_id: attempt.id }),
@@ -73,7 +69,7 @@ Deno.serve(async (req: Request) => {
       return respond({ error: `Railway scoring failed: ${text}` }, 500);
     }
 
-    // 4. Refetch the newly graded attempt from Supabase
+    // 3. Refetch the newly graded attempt from Supabase
     const { data: gradedAttempt, error: gradedAttemptError } = await supabase
       .from("student_level_attempts")
       .select("id, user_id, assessment_id, score, passed, difficulty, reward_processed_at, xp_awarded")
@@ -84,7 +80,7 @@ Deno.serve(async (req: Request) => {
       return respond({ error: "Failed to reload graded attempt" }, 500);
     }
 
-    // 5. Update the local variable so XP processing can continue
+    // 4. Update the local variable so XP processing can continue
     attempt = gradedAttempt;
   }
 
