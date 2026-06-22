@@ -10,15 +10,21 @@
 // NOT called by Flutter directly.
 //
 // ATOMICITY: All the real work (grant perks + schedule first challenge +
-// notification) happens inside ONE Postgres function, grant_track_features(),
-// defined in 2026_06_20_gamification_v2_addendum.sql. Postgres wraps function
-// bodies in a transaction automatically, so this is genuinely atomic: either
-// everything happens, or nothing does. This Edge Function is just an
-// authenticated HTTP wrapper around that one RPC call.
+// notification) happens inside ONE Postgres function,
+// initialize_student_after_diagnostic(), defined in
+// 2026_06_20_gamification_v2_addendum.sql. Postgres wraps function bodies in a
+// transaction automatically, so this is genuinely atomic: either everything
+// happens, or nothing does. This Edge Function is just an authenticated HTTP
+// wrapper around that one RPC call.
 //
 // AUTH MODEL: Server-to-server call from Railway, not a Flutter user call.
 // Protected by a shared secret header instead of a user JWT, since there's
 // no logged-in Flutter session when Railway calls this.
+//
+// NOTE: If run-scoring-engine is already calling initialize_student_after_diagnostic
+// directly (Edit 1), this function is no longer needed for the diagnostic flow.
+// It is kept here as an optional server-to-server entrypoint for Railway to
+// trigger initialization independently.
 // ============================================================
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -59,17 +65,20 @@ Deno.serve(async (req: Request) => {
 
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
-  const { data, error } = await supabase.rpc("grant_track_features", {
+  const { data, error } = await supabase.rpc("initialize_student_after_diagnostic", {
     p_user_id: user_id,
+    p_assigned_track: null,
+    p_learning_style: null,
+    p_learning_mode: null,
   });
 
   if (error) {
-    console.error("grant_track_features RPC error:", error);
+    console.error("initialize_student_after_diagnostic RPC error:", error);
     return respond({ error: "Failed to initialize track features" }, 500);
   }
 
-  // grant_track_features returns a JSONB object like:
-  // { ok: true, already_initialized: false, perks_granted: true,
+  // initialize_student_after_diagnostic returns a JSONB object like:
+  // { ok: true, was_already_onboarded: false, perks_granted: true,
   //   first_challenge_scheduled: true, assigned_track: "DA" }
   // or { ok: false, error: "..." } if validation failed inside the function.
   const result = data as Record<string, unknown>;

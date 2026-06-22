@@ -1,76 +1,57 @@
-# Learnova 🚀
+# LearNova — Mobile App
 
-Learnova is an educational Flutter app that guides learners through assessments, personalized recommendations, and a gamified learning experience.
+The Flutter client. This is the only part of the system a student ever directly interacts with.
 
-## Highlights ✨
+## What lives here
 
-- 🎯 Personalized assessments (cognitive, soft skills, learning style, career guidance)
-- 🌌 Space-themed interactive UI with SVG assets and animated transitions
-- 🗄️ Supabase-backed session/configuration support and local persistence
-- 🧭 Riverpod for state management and modular, feature-first architecture
+```
+mobile-app/
+├── lib/
+│   ├── screens/         Onboarding, diagnostics, lessons, chat, gamification UI
+│   ├── services/         Supabase client, API calls to Edge Functions
+│   ├── models/           Data models matching the Supabase schema
+│   └── widgets/          Shared/reusable UI components
+├── assets/
+└── pubspec.yaml
+```
 
-## Quick start ⚡️
+## Architecture: what this app does and does not talk to
 
-### Prerequisites 🧰
+The app holds a Supabase URL and a public anon key — nothing more sensitive. It **never** calls the Railway backend directly, and it never computes XP, exam scores, or diagnostic results client-side. Every privileged action is a call to a Supabase Edge Function, authenticated with the logged-in user's session token:
 
-- Flutter SDK (compatible with Dart >=3.0.0)
-- Android Studio or VS Code + device/emulator
+```
+Flutter  →  Supabase Edge Function (verifies session, holds service key)  →  Railway (scoring/AI)
+```
 
-### Setup 🛠️
+This means the app's job is rendering state and collecting input — not deciding what's true. A student can't, for example, edit a network request to grant themselves XP, because the XP write only ever happens server-side, gated behind a re-validated session and (where relevant) duplicate-submission checks.
+
+## Core features implemented in this client
+
+- **Onboarding diagnostics** — five assessments (personality, soft skills, learning style, career interest, cognitive aptitude) that feed the track-assignment engine.
+- **Adaptive lesson delivery** — each topic can render as Visual, Auditory, or Textual content depending on the student's calibrated learning style.
+- **Mitchy chat** — the AI mentor interface, including hidden structured actions (e.g. "switch to Visual format") parsed from Mitchy's response payload, not just plain text.
+- **Gamification** — XP display, daily streaks, weekly challenges (with a countdown to the next available window), perk inventory (Owl of Wisdom hints, Sly Fox 5000 answer eliminators), and badge collection.
+
+## Local setup
 
 ```bash
-git clone <your-repo-url>
-cd "learnova app"
+cd mobile-app
 flutter pub get
+```
+
+Create a `.env` (or use `--dart-define`, depending on how the project is configured) with:
+
+```
+SUPABASE_URL=
+SUPABASE_ANON_KEY=
+```
+
+Run:
+
+```bash
 flutter run
 ```
 
-### Common developer commands 🧪
+## Status
 
-- Install dependencies: `flutter pub get`
-- Analyze: `flutter analyze`
-- Run tests: `flutter test`
-
-## Project entrypoint 🏁
-
-The app bootstrap is in [lib/main.dart](lib/main.dart#L1). It initializes Supabase, shared preferences, and starts the app using `ProviderScope`.
-
-## Architecture & structure 🏗️
-
-High-level layout:
-
-```
-lib/
-├─ core/        # DI, theme, navigation, shared services (see core/*)
-├─ features/    # Feature-based modules (auth, home, assessment, etc.)
-└─ assets/      # Images, SVGs, and other static assets
-```
-
-- Theme tokens and colors live under `lib/core/theme`.
-- Navigation starts from `lib/core/navigation/initial_routing_screen.dart`.
-- Authentication and startup logic can be found near `lib/features/auth`.
-
-## Important notes & gotchas ⚠️
-
-- Keep `flutter` asset entries in `pubspec.yaml` synced when adding/moving assets; missing entries cause runtime failures.
-- The app uses Supabase; configure environment values in `lib/core/services/supabase/supabase_config.dart` before running in a production environment.
-- The project uses Riverpod (`flutter_riverpod`) for state — follow existing provider patterns when adding new global state.
-- See [`.github/copilot-instructions.md`](.github/copilot-instructions.md) for in-repo contributor guidelines and project conventions.
-
-## Dependencies (selected) 📦
-
-- `flutter_svg` — SVG support
-- `supabase_flutter` — Supabase client
-- `flutter_riverpod` / `riverpod` — state management
-
-## Contributing 🤝
-
-1. Fork the repository
-2. Create a feature branch
-3. Open a PR with a clear description of changes
-
-## License 📜
-
-This repository is distributed under the MIT License.
-
----
+Onboarding and diagnostic flow, adaptive content rendering, and core gamification UI are in active development. Mitchy's full structured-action handling is being built alongside the backend's AI orchestration work.
