@@ -12,6 +12,9 @@
 //   diffDays === 0  -> same day, don't change the count, multiplier 1.1x
 //   diffDays === 1  -> consecutive day, INCREMENT by 1, multiplier 1.1x
 //   diffDays  > 1   -> streak broken, RESET to 1 (today is day 1), multiplier 1.0x
+//
+// Also added resource_type validation (Edit 4): rejects null/invalid
+// resource_type before any DB work is done.
 // ============================================================
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -50,6 +53,10 @@ Deno.serve(async (req: Request) => {
   const { topic_id, resource_type, is_topic_completion = false, timezone_offset = 0 } = body;
 
   if (!topic_id) return respond({ error: "topic_id is required" }, 400);
+
+  if (!resource_type || !["Visual", "Auditory", "Textual"].includes(resource_type)) {
+    return respond({ error: "resource_type must be Visual, Auditory, or Textual" }, 400);
+  }
 
   const authHeader = req.headers.get("Authorization");
   if (!authHeader) return respond({ error: "Missing Authorization" }, 401);
