@@ -96,7 +96,7 @@ serve(async (req: Request) => {
       });
 
       if (!railwayResponse.ok) return jsonResponse({ ok: false, error: "Railway scoring failed" }, 500);
-      
+
       scoringResults.push({ result_id: row.id, test_number: row.test_number, skipped: false });
     }
 
@@ -108,24 +108,81 @@ serve(async (req: Request) => {
     const scoredCount = (updatedRows ?? []).filter((row) => row.computed_scores !== null).length;
     const allScored = scoredCount >= 5;
 
-    // ── Milestone Reward Logic ─────────────────────────────────
+    // ── Post-diagnostic initialization ──────────────────────────
+    // After all 5 diagnostic tests are scored, initialize the runtime student rows:
+    // student_profiles, user_streaks, student_perks, and first challenge schedule.
     let milestoneAwarded = false;
-    if (allScored) {
-      // Check if user already has an achievement for "Diagnostic Complete" 
-      // or simply rely on the fact that scoring only runs once.
-      // We award the 500 XP milestone.
-      const { error: xpError } = await supabaseAdmin.rpc("increment_xp", {
-        user_id_input: user.id,
-        xp_amount: 500,
-      });
+    let initializationResult: Record<string, unknown> | null = null;
 
-      if (!xpError) milestoneAwarded = true;
+    if (allScored) {
+      /*
+        We expect the Railway scoring service to have written/updated
+        student_profiles.assigned_track by now.
+
+        If your Railway scoring endpoint does NOT write student_profiles yet,
+        this query will return no assigned_track and the initializer will fail.
+      */
+      const { data: profileRow, error: profileReadError } = await supabaseAdmin
+        .from("student_profiles")
+        .select("assigned_track, learning_style, learning_mode, onboarding_complete")
+        .eq("user_id", user.id)
+        .maybeSingle();
+
+      if (profileReadError) {
+        console.error("Failed to read student profile after scoring:", profileReadError);
+        return jsonResponse(
+          { ok: false, error: "Failed to read student profile after scoring" },
+          500,
+        );
+      }
+
+      const { data: initData, error: initError } = await supabaseAdmin.rpc(
+        "initialize_student_after_diagnostic",
+        {
+          p_user_id: user.id,
+          p_assigned_track: profileRow?.assigned_track ?? null,
+          p_learning_style: profileRow?.learning_style ?? null,
+          p_learning_mode: profileRow?.learning_mode ?? null,
+        },
+      );
+
+      if (initError) {
+        console.error("initialize_student_after_diagnostic failed:", initError);
+        return jsonResponse(
+          {
+            ok: false,
+            error: "Student initialization failed after diagnostic scoring",
+            details: initError.message,
+          },
+          500,
+        );
+      }
+
+      initializationResult = initData as Record<string, unknown>;
+
+      /*
+        Award diagnostic completion XP only once.
+        If the student was already onboarded, do not award again.
+      */
+      if (initializationResult?.was_already_onboarded === false) {
+        const { error: xpError } = await supabaseAdmin.rpc("increment_xp", {
+          user_id_input: user.id,
+          xp_amount: 500,
+        });
+
+        if (xpError) {
+          console.error("Diagnostic milestone XP failed:", xpError);
+        } else {
+          milestoneAwarded = true;
+        }
+      }
     }
 
     return jsonResponse({
       ok: true,
       all_scored: allScored,
       milestone_awarded: milestoneAwarded,
+      initialization: initializationResult,
       diagnostic_results: updatedRows,
     });
   } catch (error) {
