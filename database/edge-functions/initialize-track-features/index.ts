@@ -1,32 +1,3 @@
-// ============================================================
-// LearNova Edge Function: initialize-track-features
-// Location: supabase/functions/initialize-track-features/index.ts
-// ============================================================
-//
-// WHAT THIS FUNCTION DOES (Section 3.3 of the handover):
-// Fires exactly once per student, the moment student_profiles.assigned_track
-// changes from "Foundation" to "DA"/"DE"/"DS". Called by the Railway scoring
-// engine (diagnostic_profile.py) immediately after it writes assigned_track —
-// NOT called by Flutter directly.
-//
-// ATOMICITY: All the real work (grant perks + schedule first challenge +
-// notification) happens inside ONE Postgres function,
-// initialize_student_after_diagnostic(), defined in
-// 2026_06_20_gamification_v2_addendum.sql. Postgres wraps function bodies in a
-// transaction automatically, so this is genuinely atomic: either everything
-// happens, or nothing does. This Edge Function is just an authenticated HTTP
-// wrapper around that one RPC call.
-//
-// AUTH MODEL: Server-to-server call from Railway, not a Flutter user call.
-// Protected by a shared secret header instead of a user JWT, since there's
-// no logged-in Flutter session when Railway calls this.
-//
-// NOTE: If run-scoring-engine is already calling initialize_student_after_diagnostic
-// directly (Edit 1), this function is no longer needed for the diagnostic flow.
-// It is kept here as an optional server-to-server entrypoint for Railway to
-// trigger initialization independently.
-// ============================================================
-
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
@@ -47,13 +18,18 @@ Deno.serve(async (req: Request) => {
 
   if (req.method !== "POST") return respond({ error: "Method not allowed" }, 405);
 
-  // ── Server-to-server auth via shared secret ──────────────────
   const apiKey = req.headers.get("x-api-key");
   if (!apiKey || apiKey !== INIT_TRACK_FEATURES_API_KEY) {
     return respond({ error: "Unauthorized" }, 401);
   }
 
-  let body: { user_id?: string };
+  let body: {
+    user_id?: string;
+    assigned_track?: string | null;
+    learning_style?: string | null;
+    learning_mode?: string | null;
+  };
+
   try {
     body = await req.json();
   } catch {
@@ -67,20 +43,22 @@ Deno.serve(async (req: Request) => {
 
   const { data, error } = await supabase.rpc("initialize_student_after_diagnostic", {
     p_user_id: user_id,
-    p_assigned_track: null,
-    p_learning_style: null,
-    p_learning_mode: null,
+    p_assigned_track: body.assigned_track ?? null,
+    p_learning_style: body.learning_style ?? null,
+    p_learning_mode: body.learning_mode ?? null,
   });
 
   if (error) {
     console.error("initialize_student_after_diagnostic RPC error:", error);
-    return respond({ error: "Failed to initialize track features" }, 500);
+    return respond(
+      {
+        error: "Failed to initialize track features and diagnostic rewards",
+        details: error.message,
+      },
+      500,
+    );
   }
 
-  // initialize_student_after_diagnostic returns a JSONB object like:
-  // { ok: true, was_already_onboarded: false, perks_granted: true,
-  //   first_challenge_scheduled: true, assigned_track: "DA" }
-  // or { ok: false, error: "..." } if validation failed inside the function.
   const result = data as Record<string, unknown>;
 
   if (result.ok === false) {
