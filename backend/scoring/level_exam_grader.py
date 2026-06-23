@@ -79,7 +79,7 @@ def health() -> dict[str, Any]:
         "ok": True,
         "service": "level_exam_grader",
         "route": "/grade-level-attempt",
-        "build_marker": "level-grader-provider-strict-fix-004",
+        "build_marker": "level-grader-answer-parser-provider-format-fix-005",
         "provider_status": provider_status(),
         "has_level_grader_api_key": bool(APP_API_KEY),
         "has_supabase_url": bool(os.getenv("SUPABASE_URL")),
@@ -166,7 +166,7 @@ def grade_level_attempt(payload: GradeRequest, x_api_key: Optional[str] = Header
         "Grade only against the provided rubric, not against external assumptions. "
         "A student can use different wording and still be correct if the meaning matches. "
         "Award partial credit for correct steps. Do not require exact phrasing. "
-        "Return only valid JSON matching the schema."
+        "Return only valid JSON. Do not return markdown, explanations outside JSON, or code fences."
     )
 
     user_prompt = json.dumps(
@@ -180,6 +180,19 @@ def grade_level_attempt(payload: GradeRequest, x_api_key: Optional[str] = Header
                 "If the answer is empty or unrelated, score 0 and correct=false.",
                 "Feedback should be concise and actionable.",
             ],
+            "required_json_shape": {
+                "questions": [
+                    {
+                        "question_id": "same question_id from input",
+                        "order_index": 1,
+                        "score": 0,
+                        "correct": False,
+                        "feedback": "short feedback",
+                        "missing_points": ["optional missing point"]
+                    }
+                ],
+                "overall_feedback": "short overall feedback"
+            },
             "questions": grading_items,
         },
         ensure_ascii=False,
@@ -433,26 +446,80 @@ def _difficulty_order_range(difficulty: Optional[str]) -> tuple[Optional[int], O
 
 
 def _normalize_answers(raw: Any) -> dict[str, Any]:
+    """Normalize every supported Flutter answer payload into a question-id map.
+
+    Critical fix:
+    Supabase stores level answers as {"answers": [{"question_id": ..., "essay_answer": ...}]}.
+    Older grader code ignored the nested "answers" list and ignored "essay_answer",
+    so real written answers were treated as empty.
+    """
     if isinstance(raw, str):
         try:
             raw = json.loads(raw)
         except json.JSONDecodeError:
             return {"1": raw}
 
-    if isinstance(raw, list):
-        out = {}
-        for i, item in enumerate(raw, start=1):
-            if isinstance(item, dict):
-                qid = item.get("question_id") or item.get("id") or str(i)
-                out[str(qid)] = item.get("answer") or item.get("value") or item.get("text") or ""
-            else:
-                out[str(i)] = item
-        return out
-
+    # Common stored shape: {"answers": [ ... ]}
     if isinstance(raw, dict):
+        for list_key in ("answers", "responses", "items", "data"):
+            if isinstance(raw.get(list_key), list):
+                return _normalize_answers(raw[list_key])
+
+        # Direct object keyed by question_id/order.
         return {str(k): v for k, v in raw.items()}
 
+    if isinstance(raw, list):
+        out: dict[str, Any] = {}
+
+        for i, item in enumerate(raw, start=1):
+            if isinstance(item, dict):
+                answer_value = _extract_answer_text(item)
+                keys = [
+                    item.get("question_id"),
+                    item.get("id"),
+                    item.get("question_key"),
+                    item.get("order_index"),
+                    item.get("display_order"),
+                    str(i),
+                    f"q{i}",
+                ]
+
+                for key in keys:
+                    if key is None:
+                        continue
+
+                    normalized_key = str(key)
+
+                    # Prefer the latest non-empty answer if duplicates exist.
+                    if str(answer_value).strip() or normalized_key not in out:
+                        out[normalized_key] = answer_value
+            else:
+                out[str(i)] = item
+                out[f"q{i}"] = item
+
+        return out
+
     return {}
+
+
+def _extract_answer_text(item: dict[str, Any]) -> Any:
+    """Extract written answer text from all known frontend key names."""
+    for key in (
+        "essay_answer",
+        "answer",
+        "value",
+        "text",
+        "selected_answer",
+        "selectedAnswer",
+        "response",
+        "content",
+    ):
+        value = item.get(key)
+
+        if value is not None:
+            return value
+
+    return ""
 
 
 def _safe_json_or_text(value: Any) -> Any:
