@@ -19,7 +19,7 @@ from typing import Any, Optional
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from scoring.provider_client import generate_text, parse_json_object
+from scoring.provider_client import ProviderChainError, generate_text, parse_json_object, provider_status
 from scoring.supabase_utils import get_client
 
 logging.basicConfig(level=logging.INFO)
@@ -79,7 +79,8 @@ def health() -> dict[str, Any]:
         "ok": True,
         "service": "level_exam_grader",
         "route": "/grade-level-attempt",
-        "build_marker": "level-grader-deterministic-scoring-fix-003",
+        "build_marker": "level-grader-provider-strict-fix-004",
+        "provider_status": provider_status(),
         "has_level_grader_api_key": bool(APP_API_KEY),
         "has_supabase_url": bool(os.getenv("SUPABASE_URL")),
         "has_supabase_service_role_key": bool(os.getenv("SUPABASE_SERVICE_ROLE_KEY")),
@@ -188,10 +189,42 @@ def grade_level_attempt(payload: GradeRequest, x_api_key: Optional[str] = Header
         result = generate_text(system_prompt, user_prompt, json_schema=GRADE_SCHEMA)
         parsed = parse_json_object(result.text)
         provider, model = result.provider, result.model
+    except ProviderChainError as exc:
+        logger.exception("Provider grading failed; refusing to grade with local fallback: %s", exc)
+        _mark_attempt_provider_failed(
+            supabase=supabase,
+            attempt_id=payload.attempt_id,
+            error_message=str(exc),
+            provider_errors=exc.errors,
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "AI provider chain unavailable",
+                "message": "The level exam was not graded. Configure at least one working provider and retry.",
+                "attempt_id": payload.attempt_id,
+                "provider_errors": exc.errors,
+                "provider_status": provider_status(),
+            },
+        )
     except Exception as exc:
-        logger.exception("Provider grading failed; using conservative local fallback: %s", exc)
-        parsed = _local_grade_fallback(grading_items)
-        provider, model = "local_rubric_fallback", "keyword_overlap"
+        logger.exception("Provider grading failed unexpectedly; refusing to grade with local fallback: %s", exc)
+        _mark_attempt_provider_failed(
+            supabase=supabase,
+            attempt_id=payload.attempt_id,
+            error_message=f"{type(exc).__name__}: {str(exc)}",
+            provider_errors=[f"{type(exc).__name__}: {str(exc)}"],
+        )
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "AI provider grading failed",
+                "message": "The level exam was not graded. Check Railway logs and provider configuration.",
+                "attempt_id": payload.attempt_id,
+                "exception": f"{type(exc).__name__}: {str(exc)}",
+                "provider_status": provider_status(),
+            },
+        )
 
     question_grades = _validate_question_grades(parsed, grading_items)
 
@@ -260,6 +293,39 @@ def grade_level_attempt(payload: GradeRequest, x_api_key: Optional[str] = Header
         model=model,
         question_count=len(question_grades),
     )
+
+
+
+def _mark_attempt_provider_failed(
+    *,
+    supabase,
+    attempt_id: str,
+    error_message: str,
+    provider_errors: list[str],
+) -> None:
+    """Record provider failure without assigning a false 0% grade."""
+    payload = {
+        "score": None,
+        "passed": None,
+        "mitchy_feedback": (
+            "Level exam grading was not completed because the AI provider chain "
+            "was unavailable. Please retry after provider configuration is fixed."
+        ),
+        "grade_breakdown": {
+            "provider": "provider_chain_unavailable",
+            "model": None,
+            "grading_completed": False,
+            "provider_errors": provider_errors,
+            "error_message": error_message,
+            "provider_status": provider_status(),
+        },
+        "grading_status": "failed",
+    }
+
+    try:
+        supabase.table("student_level_attempts").update(payload).eq("id", attempt_id).execute()
+    except Exception as exc:
+        logger.warning("Failed to mark attempt provider failure: %s", exc)
 
 
 def _fetch_attempt(supabase, attempt_id: str) -> dict[str, Any]:
