@@ -1,4 +1,4 @@
-"""LearNova written level exam grader....
+"""LearNova written level exam grader.
 
 Railway service start command:
 uvicorn scoring.level_exam_grader:app --host 0.0.0.0 --port $PORT
@@ -78,6 +78,7 @@ def health() -> dict[str, Any]:
         "ok": True,
         "service": "level_exam_grader",
         "route": "/grade-level-attempt",
+        "build_marker": "level-grader-visible-update-001",
         "has_level_grader_api_key": bool(APP_API_KEY),
         "has_supabase_url": bool(os.getenv("SUPABASE_URL")),
         "has_supabase_service_role_key": bool(os.getenv("SUPABASE_SERVICE_ROLE_KEY")),
