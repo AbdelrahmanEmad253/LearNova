@@ -100,6 +100,15 @@ def provider_status() -> dict[str, Any]:
         "timeout_seconds": TIMEOUT,
         "max_tokens": MAX_TOKENS,
         "temperature": TEMPERATURE,
+        "response_format": {
+            "global_default": os.getenv("AI_USE_RESPONSE_FORMAT", "false"),
+            "nararouter": os.getenv("NARAROUTER_USE_RESPONSE_FORMAT", os.getenv("AI_USE_RESPONSE_FORMAT", "false")),
+            "groq": os.getenv("GROQ_USE_RESPONSE_FORMAT", os.getenv("AI_USE_RESPONSE_FORMAT", "false")),
+            "gemini": os.getenv("GEMINI_USE_RESPONSE_FORMAT", os.getenv("AI_USE_RESPONSE_FORMAT", "false")),
+            "openrouter": os.getenv("OPENROUTER_USE_RESPONSE_FORMAT", os.getenv("AI_USE_RESPONSE_FORMAT", "false")),
+            "github": os.getenv("GITHUB_USE_RESPONSE_FORMAT", os.getenv("AI_USE_RESPONSE_FORMAT", "false")),
+            "xai": os.getenv("XAI_USE_RESPONSE_FORMAT", os.getenv("AI_USE_RESPONSE_FORMAT", "false")),
+        },
     }
 
 
@@ -223,9 +232,13 @@ def _call_openai_compatible(
         ],
     }
 
-    # Some OpenAI-compatible gateways do not support strict response_format.
-    # Keep it enabled by default but allow disabling from Railway env.
-    use_response_format = os.getenv(f"{provider.upper()}_USE_RESPONSE_FORMAT", os.getenv("AI_USE_RESPONSE_FORMAT", "true")).lower() != "false"
+    # Most gateways/models do NOT all support strict json_schema response_format.
+    # Default to prompt-only JSON, but still validate that JSON came back when
+    # json_schema is provided. Enable strict mode only per-provider if confirmed.
+    use_response_format = os.getenv(
+        f"{provider.upper()}_USE_RESPONSE_FORMAT",
+        os.getenv("AI_USE_RESPONSE_FORMAT", "false"),
+    ).lower() == "true"
 
     if json_schema and use_response_format:
         payload["response_format"] = {
@@ -250,6 +263,14 @@ def _call_openai_compatible(
     if not text.strip():
         raise RuntimeError("empty response")
 
+    # If the caller requested a JSON result, validate it here so the provider
+    # chain can continue to the next provider instead of returning unusable text.
+    if json_schema:
+        try:
+            parse_json_object(text)
+        except Exception as exc:
+            raise RuntimeError(f"provider returned non-JSON output: {type(exc).__name__}: {str(exc)}")
+
     return ProviderResult(provider=provider, model=model, text=text)
 
 
@@ -270,11 +291,18 @@ def _call_gemini(system_prompt: str, user_prompt: str, *, json_schema: Optional[
         },
     }
 
-    if json_schema:
+    use_response_schema = os.getenv(
+        "GEMINI_USE_RESPONSE_FORMAT",
+        os.getenv("AI_USE_RESPONSE_FORMAT", "false"),
+    ).lower() == "true"
+
+    if json_schema and use_response_schema:
+        # Gemini's responseSchema is not fully compatible with JSON Schema.
+        # Keep it opt-in only. Prompt-only JSON is safer across providers.
         payload["generationConfig"].update(
             {
                 "responseMimeType": "application/json",
-                "responseSchema": json_schema,
+                "responseSchema": _strip_unsupported_schema_keys(json_schema),
             }
         )
 
@@ -289,7 +317,29 @@ def _call_gemini(system_prompt: str, user_prompt: str, *, json_schema: Optional[
     if not text.strip():
         raise RuntimeError("empty response")
 
+    if json_schema:
+        try:
+            parse_json_object(text)
+        except Exception as exc:
+            raise RuntimeError(f"provider returned non-JSON output: {type(exc).__name__}: {str(exc)}")
+
     return ProviderResult(provider="gemini", model=model, text=text)
+
+
+def _strip_unsupported_schema_keys(schema: Any) -> Any:
+    """Remove JSON Schema keys that Gemini responseSchema rejects."""
+    if isinstance(schema, dict):
+        blocked = {"additionalProperties", "$schema"}
+        return {
+            key: _strip_unsupported_schema_keys(value)
+            for key, value in schema.items()
+            if key not in blocked
+        }
+
+    if isinstance(schema, list):
+        return [_strip_unsupported_schema_keys(item) for item in schema]
+
+    return schema
 
 
 def parse_json_object(text: str) -> dict[str, Any]:
