@@ -44,21 +44,41 @@ serve(async (req: Request) => {
     const supabaseServiceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY");
 
     const scoringServiceUrl = Deno.env.get("SCORING_SERVICE_URL");
-    const scoringServiceApiKey = Deno.env.get("SCORING_SERVICE_API_KEY");
+    const scoringServiceApiKey =
+      Deno.env.get("SCORING_SERVICE_API_KEY") ?? Deno.env.get("SCORING_API_KEY");
 
     if (!supabaseUrl || !supabaseAnonKey || !supabaseServiceRoleKey) {
       return jsonResponse({ ok: false, error: "Supabase environment variables are missing" }, 500);
     }
 
+    if (!scoringServiceUrl || !scoringServiceApiKey) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: "Scoring service environment variables are missing",
+          required: ["SCORING_SERVICE_URL", "SCORING_SERVICE_API_KEY or SCORING_API_KEY"],
+        },
+        500,
+      );
+    }
+
     const authHeader = req.headers.get("Authorization");
-    if (!authHeader) return jsonResponse({ ok: false, error: "Missing Authorization header" }, 401);
+    if (!authHeader) {
+      return jsonResponse({ ok: false, error: "Missing Authorization header" }, 401);
+    }
 
     const supabaseUserClient = createClient(supabaseUrl, supabaseAnonKey, {
       global: { headers: { Authorization: authHeader } },
     });
 
-    const { data: { user }, error: userError } = await supabaseUserClient.auth.getUser();
-    if (userError || !user) return jsonResponse({ ok: false, error: "Invalid or expired user session" }, 401);
+    const {
+      data: { user },
+      error: userError,
+    } = await supabaseUserClient.auth.getUser();
+
+    if (userError || !user) {
+      return jsonResponse({ ok: false, error: "Invalid or expired user session" }, 401);
+    }
 
     const supabaseAdmin = createClient(supabaseUrl, supabaseServiceRoleKey);
     const requestBody = await req.json().catch(() => ({}));
@@ -70,18 +90,23 @@ serve(async (req: Request) => {
       .eq("user_id", user.id)
       .order("test_number", { ascending: true });
 
-    if (resultsError) return jsonResponse({ ok: false, error: "Failed to fetch diagnostic test results" }, 500);
+    if (resultsError) {
+      return jsonResponse({ ok: false, error: "Failed to fetch diagnostic test results" }, 500);
+    }
 
     const results = (diagnosticRows ?? []) as DiagnosticResultRow[];
 
     if (results.length < 5) {
-      return jsonResponse({ ok: false, error: "Diagnostic tests are not complete yet", tests_found: results.length }, 400);
+      return jsonResponse(
+        { ok: false, error: "Diagnostic tests are not complete yet", tests_found: results.length },
+        400,
+      );
     }
 
-    const railwayBaseUrl = scoringServiceUrl?.replace(/\/$/, "");
+    const railwayBaseUrl = scoringServiceUrl.replace(/\/$/, "");
     const railwayUrl = `${railwayBaseUrl}/score/diagnostic-result`;
 
-    const scoringResults: any[] = [];
+    const scoringResults: Array<Record<string, unknown>> = [];
 
     for (const row of results) {
       if (row.computed_scores !== null && !forceRescore) {
@@ -91,37 +116,46 @@ serve(async (req: Request) => {
 
       const railwayResponse = await fetch(railwayUrl, {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": scoringServiceApiKey! },
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": scoringServiceApiKey,
+        },
         body: JSON.stringify({ result_id: row.id }),
       });
 
-      if (!railwayResponse.ok) return jsonResponse({ ok: false, error: "Railway scoring failed" }, 500);
+      if (!railwayResponse.ok) {
+        const details = await railwayResponse.text().catch(() => "");
+        return jsonResponse(
+          {
+            ok: false,
+            error: "Railway scoring failed",
+            status: railwayResponse.status,
+            details: details.slice(0, 1000),
+          },
+          500,
+        );
+      }
 
       scoringResults.push({ result_id: row.id, test_number: row.test_number, skipped: false });
     }
 
-    const { data: updatedRows } = await supabaseAdmin
+    const { data: updatedRows, error: updatedRowsError } = await supabaseAdmin
       .from("diagnostic_test_results")
       .select("id, test_number, computed_scores")
       .eq("user_id", user.id);
 
+    if (updatedRowsError) {
+      return jsonResponse({ ok: false, error: "Failed to reload diagnostic results" }, 500);
+    }
+
     const scoredCount = (updatedRows ?? []).filter((row) => row.computed_scores !== null).length;
     const allScored = scoredCount >= 5;
 
-    // ── Post-diagnostic initialization ──────────────────────────
-    // After all 5 diagnostic tests are scored, initialize the runtime student rows:
-    // student_profiles, user_streaks, student_perks, and first challenge schedule.
-    let milestoneAwarded = false;
+    // SQL function is now the single source of truth for:
+    // profile initialization, starter perks, 500 diagnostic XP, and first challenge schedule.
     let initializationResult: Record<string, unknown> | null = null;
 
     if (allScored) {
-      /*
-        We expect the Railway scoring service to have written/updated
-        student_profiles.assigned_track by now.
-
-        If your Railway scoring endpoint does NOT write student_profiles yet,
-        this query will return no assigned_track and the initializer will fail.
-      */
       const { data: profileRow, error: profileReadError } = await supabaseAdmin
         .from("student_profiles")
         .select("assigned_track, learning_style, learning_mode, onboarding_complete")
@@ -151,7 +185,7 @@ serve(async (req: Request) => {
         return jsonResponse(
           {
             ok: false,
-            error: "Student initialization failed after diagnostic scoring",
+            error: "Student initialization/reward grant failed after diagnostic scoring",
             details: initError.message,
           },
           500,
@@ -160,32 +194,36 @@ serve(async (req: Request) => {
 
       initializationResult = initData as Record<string, unknown>;
 
-      /*
-        Award diagnostic completion XP only once.
-        If the student was already onboarded, do not award again.
-      */
-      if (initializationResult?.was_already_onboarded === false) {
-        const { error: xpError } = await supabaseAdmin.rpc("increment_xp", {
-          user_id_input: user.id,
-          xp_amount: 500,
-        });
-
-        if (xpError) {
-          console.error("Diagnostic milestone XP failed:", xpError);
-        } else {
-          milestoneAwarded = true;
-        }
+      if (initializationResult?.ok === false) {
+        return jsonResponse(
+          {
+            ok: false,
+            error: "Student initialization returned ok=false",
+            initialization: initializationResult,
+          },
+          409,
+        );
       }
     }
 
     return jsonResponse({
       ok: true,
       all_scored: allScored,
-      milestone_awarded: milestoneAwarded,
+      scored_count: scoredCount,
+      diagnostic_xp_awarded_now: initializationResult?.diagnostic_xp_awarded_now ?? false,
+      diagnostic_xp_already_awarded: initializationResult?.diagnostic_xp_already_awarded ?? false,
+      diagnostic_xp_amount: initializationResult?.diagnostic_xp_amount ?? 0,
+      starter_perks: initializationResult?.starter_perks ?? null,
+      perks_inserted: initializationResult?.perks_inserted ?? false,
+      perks_already_existed: initializationResult?.perks_already_existed ?? false,
       initialization: initializationResult,
+      scoring_results: scoringResults,
       diagnostic_results: updatedRows,
     });
   } catch (error) {
-    return jsonResponse({ ok: false, error: error instanceof Error ? error.message : "Unknown error" }, 500);
+    return jsonResponse(
+      { ok: false, error: error instanceof Error ? error.message : "Unknown error" },
+      500,
+    );
   }
 });
