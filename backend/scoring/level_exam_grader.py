@@ -19,7 +19,7 @@ from typing import Any, Optional
 from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
-from scoring.provider_client import ProviderChainError, generate_text, parse_json_object, provider_status
+from scoring.provider_client import ProviderChainError, generate_text, provider_status
 from scoring.supabase_utils import get_client
 
 logging.basicConfig(level=logging.INFO)
@@ -79,7 +79,7 @@ def health() -> dict[str, Any]:
         "ok": True,
         "service": "level_exam_grader",
         "route": "/grade-level-attempt",
-        "build_marker": "level-grader-answer-parser-provider-format-fix-005",
+        "build_marker": "level-grader-plain-text-batch-fix-006",
         "provider_status": provider_status(),
         "has_level_grader_api_key": bool(APP_API_KEY),
         "has_supabase_url": bool(os.getenv("SUPABASE_URL")),
@@ -161,85 +161,13 @@ def grade_level_attempt(payload: GradeRequest, x_api_key: Optional[str] = Header
             }
         )
 
-    system_prompt = (
-        "You are Mitchy, LearNova's strict but fair written exam grader. "
-        "Grade only against the provided rubric, not against external assumptions. "
-        "A student can use different wording and still be correct if the meaning matches. "
-        "Award partial credit for correct steps. Do not require exact phrasing. "
-        "Return only valid JSON. Do not return markdown, explanations outside JSON, or code fences."
-    )
+    # Important design change:
+    # Do NOT require JSON output from providers. Several providers/models return
+    # good natural language but fail strict JSON parsing. For level grading we use
+    # a pipe-delimited plain-text contract and parse it defensively.
+    question_grades, provider, model, provider_errors, raw_provider_output = _grade_with_plain_text_batch(grading_items)
 
-    user_prompt = json.dumps(
-        {
-            "task": "Grade these written level exam answers.",
-            "grading_rules": [
-                "Grade each question independently against its rubric.",
-                "Use strict binary correctness for final scoring: correct answers should receive 100, incorrect answers should receive 0.",
-                "Set correct=true only when the answer contains the required rubric meaning.",
-                "Do not give high scores for vague, incomplete, or unrelated answers.",
-                "If the answer is empty or unrelated, score 0 and correct=false.",
-                "Feedback should be concise and actionable.",
-            ],
-            "required_json_shape": {
-                "questions": [
-                    {
-                        "question_id": "same question_id from input",
-                        "order_index": 1,
-                        "score": 0,
-                        "correct": False,
-                        "feedback": "short feedback",
-                        "missing_points": ["optional missing point"]
-                    }
-                ],
-                "overall_feedback": "short overall feedback"
-            },
-            "questions": grading_items,
-        },
-        ensure_ascii=False,
-    )
 
-    try:
-        result = generate_text(system_prompt, user_prompt, json_schema=GRADE_SCHEMA)
-        parsed = parse_json_object(result.text)
-        provider, model = result.provider, result.model
-    except ProviderChainError as exc:
-        logger.exception("Provider grading failed; refusing to grade with local fallback: %s", exc)
-        _mark_attempt_provider_failed(
-            supabase=supabase,
-            attempt_id=payload.attempt_id,
-            error_message=str(exc),
-            provider_errors=exc.errors,
-        )
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": "AI provider chain unavailable",
-                "message": "The level exam was not graded. Configure at least one working provider and retry.",
-                "attempt_id": payload.attempt_id,
-                "provider_errors": exc.errors,
-                "provider_status": provider_status(),
-            },
-        )
-    except Exception as exc:
-        logger.exception("Provider grading failed unexpectedly; refusing to grade with local fallback: %s", exc)
-        _mark_attempt_provider_failed(
-            supabase=supabase,
-            attempt_id=payload.attempt_id,
-            error_message=f"{type(exc).__name__}: {str(exc)}",
-            provider_errors=[f"{type(exc).__name__}: {str(exc)}"],
-        )
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "error": "AI provider grading failed",
-                "message": "The level exam was not graded. Check Railway logs and provider configuration.",
-                "attempt_id": payload.attempt_id,
-                "exception": f"{type(exc).__name__}: {str(exc)}",
-                "provider_status": provider_status(),
-            },
-        )
-
-    question_grades = _validate_question_grades(parsed, grading_items)
 
     if LEVEL_EXAM_BINARY_SCORING:
         correct_count = sum(1 for q in question_grades if q.get("correct") is True)
@@ -249,7 +177,7 @@ def grade_level_attempt(payload: GradeRequest, x_api_key: Optional[str] = Header
         overall_score = round(sum(q["score"] for q in question_grades) / len(question_grades), 2)
 
     passed = overall_score >= PASSING_SCORE
-    feedback = parsed.get("overall_feedback") or _build_overall_feedback(question_grades, overall_score)
+    feedback = _build_overall_feedback(question_grades, overall_score)
 
     safe_payload = {
         "score": overall_score,
@@ -262,6 +190,8 @@ def grade_level_attempt(payload: GradeRequest, x_api_key: Optional[str] = Header
             "correct_count": correct_count,
             "total_questions": len(question_grades),
             "questions": question_grades,
+            "provider_errors": provider_errors,
+            "raw_provider_output_preview": raw_provider_output[:3000] if raw_provider_output else None,
         },
         "grading_status": "graded",
     }
@@ -306,6 +236,244 @@ def grade_level_attempt(payload: GradeRequest, x_api_key: Optional[str] = Header
         model=model,
         question_count=len(question_grades),
     )
+
+
+
+
+def _grade_with_plain_text_batch(
+    grading_items: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], str, str, list[str], str]:
+    """Grade all answered questions using provider plain text, not JSON.
+
+    This fixes the current production problem where providers return useful text
+    but the grader fails because the output is not valid JSON.
+    """
+    non_empty_items = [
+        item for item in grading_items
+        if str(item.get("student_answer") or "").strip()
+    ]
+
+    # Blank questions should not poison the whole exam. They are simply wrong.
+    grades_by_id: dict[str, dict[str, Any]] = {
+        item["question_id"]: _blank_grade(item)
+        for item in grading_items
+        if not str(item.get("student_answer") or "").strip()
+    }
+
+    provider = "none"
+    model = "none"
+    provider_errors: list[str] = []
+    raw_output = ""
+
+    if non_empty_items:
+        try:
+            result = _call_plain_text_grader(non_empty_items)
+            provider = result.provider
+            model = result.model
+            raw_output = result.text or ""
+            parsed_grades = _parse_plain_text_grade_lines(raw_output, non_empty_items)
+
+            grades_by_id.update(parsed_grades)
+
+            missing_items = [
+                item for item in non_empty_items
+                if item["question_id"] not in parsed_grades
+            ]
+
+            if missing_items:
+                provider_errors.append(
+                    f"provider_output_parse_partial: parsed {len(parsed_grades)} of {len(non_empty_items)} answered item(s); local fallback used for the rest"
+                )
+                for item in missing_items:
+                    grades_by_id[item["question_id"]] = _local_grade_one(item)
+                    grades_by_id[item["question_id"]]["provider_parse_fallback"] = True
+
+        except ProviderChainError as exc:
+            provider = "local_keyword_fallback"
+            model = "provider_chain_failed"
+            provider_errors.extend(exc.errors)
+            logger.warning("Provider chain failed; using local fallback per answered question: %s", exc)
+            for item in non_empty_items:
+                grades_by_id[item["question_id"]] = _local_grade_one(item)
+                grades_by_id[item["question_id"]]["provider_failure_fallback"] = True
+
+        except Exception as exc:
+            provider = "local_keyword_fallback"
+            model = "plain_text_grader_exception"
+            provider_errors.append(f"{type(exc).__name__}: {str(exc)}")
+            logger.warning("Plain text grading failed; using local fallback: %s", exc)
+            for item in non_empty_items:
+                grades_by_id[item["question_id"]] = _local_grade_one(item)
+                grades_by_id[item["question_id"]]["provider_failure_fallback"] = True
+
+    question_grades: list[dict[str, Any]] = []
+    for item in grading_items:
+        grade = grades_by_id.get(item["question_id"]) or _local_grade_one(item)
+        question_grades.append(_normalize_final_grade(grade, item))
+
+    if provider == "none":
+        provider = "local_blank_only"
+        model = "no_answered_questions"
+
+    return question_grades, provider, model, provider_errors, raw_output
+
+
+def _call_plain_text_grader(items: list[dict[str, Any]]):
+    system_prompt = (
+        "You are LearNova's strict written exam grader. "
+        "Grade only against the rubric. "
+        "Do not return JSON. Do not use markdown. "
+        "Return one pipe-delimited line per question only."
+    )
+
+    compact_items = []
+    for item in items:
+        compact_items.append({
+            "question_id": item["question_id"],
+            "order_index": item.get("order_index"),
+            "question_text": item.get("question_text"),
+            "rubric": item.get("rubric"),
+            "student_answer": item.get("student_answer"),
+        })
+
+    user_prompt = (
+        "Grade these written answers.\\n"
+        "For each question, return exactly one line using this format:\\n"
+        "QUESTION_ID|ORDER_INDEX|CORRECT|short feedback\\n"
+        "or\\n"
+        "QUESTION_ID|ORDER_INDEX|INCORRECT|short feedback\\n\\n"
+        "Rules:\\n"
+        "- Use CORRECT only if the answer satisfies the important rubric meaning.\\n"
+        "- Use INCORRECT for blank, random, vague, unrelated, or insufficient answers.\\n"
+        "- Do not give partial credit in the output. The backend will calculate the score.\\n"
+        "- Do not return JSON. Do not include explanations before or after the lines.\\n\\n"
+        "Questions:\\n"
+        + json.dumps(compact_items, ensure_ascii=False)
+    )
+
+    return generate_text(system_prompt, user_prompt, json_schema=None)
+
+
+def _parse_plain_text_grade_lines(
+    text: str,
+    items: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    by_id = {item["question_id"]: item for item in items}
+    parsed: dict[str, dict[str, Any]] = {}
+
+    raw_text = str(text or "").strip()
+    if not raw_text:
+        return parsed
+
+    # Remove code fences if a model ignores instructions.
+    raw_text = re.sub(r"^```(?:text|txt)?\\s*", "", raw_text.strip(), flags=re.IGNORECASE)
+    raw_text = re.sub(r"\\s*```$", "", raw_text.strip())
+
+    for line in raw_text.splitlines():
+        cleaned = line.strip().strip("-* ")
+        if not cleaned:
+            continue
+
+        # Preferred format: question_id|order|CORRECT|feedback
+        parts = [part.strip() for part in cleaned.split("|")]
+        if len(parts) >= 3:
+            qid = parts[0]
+            verdict = parts[2].upper()
+            if qid in by_id and verdict in {"CORRECT", "INCORRECT", "WRONG", "FALSE", "TRUE"}:
+                is_correct = verdict in {"CORRECT", "TRUE"}
+                parsed[qid] = {
+                    "question_id": qid,
+                    "order_index": by_id[qid].get("order_index"),
+                    "score": 100 if is_correct else 0,
+                    "correct": is_correct,
+                    "feedback": parts[3] if len(parts) >= 4 and parts[3] else _default_feedback(is_correct),
+                    "missing_points": [],
+                    "grading_source": "provider_plain_text",
+                }
+                continue
+
+        # Defensive parsing: find any known question_id in the line.
+        for qid, item in by_id.items():
+            if qid in cleaned:
+                upper = cleaned.upper()
+                if "INCORRECT" in upper or "WRONG" in upper or "FALSE" in upper:
+                    is_correct = False
+                elif "CORRECT" in upper or "TRUE" in upper:
+                    is_correct = True
+                else:
+                    continue
+
+                parsed[qid] = {
+                    "question_id": qid,
+                    "order_index": item.get("order_index"),
+                    "score": 100 if is_correct else 0,
+                    "correct": is_correct,
+                    "feedback": _extract_feedback_from_line(cleaned) or _default_feedback(is_correct),
+                    "missing_points": [],
+                    "grading_source": "provider_plain_text_defensive_parse",
+                }
+
+    return parsed
+
+
+def _extract_feedback_from_line(line: str) -> str:
+    parts = [part.strip() for part in line.split("|")]
+    if len(parts) >= 4 and parts[3]:
+        return parts[3]
+    return ""
+
+
+def _default_feedback(is_correct: bool) -> str:
+    return (
+        "Answer satisfies the required rubric meaning."
+        if is_correct
+        else "Answer does not satisfy the required rubric meaning."
+    )
+
+
+def _blank_grade(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "question_id": item["question_id"],
+        "order_index": int(item.get("order_index") or 0),
+        "score": 0,
+        "correct": False,
+        "feedback": "No answer was provided for this question.",
+        "missing_points": [],
+        "grading_source": "blank_answer",
+    }
+
+
+def _normalize_final_grade(grade: dict[str, Any], item: dict[str, Any]) -> dict[str, Any]:
+    student_answer = str(item.get("student_answer") or "").strip()
+
+    if not student_answer:
+        is_correct = False
+        raw_score = 0.0
+    else:
+        try:
+            raw_score = max(0.0, min(100.0, float(grade.get("score", 0))))
+        except Exception:
+            raw_score = 0.0
+
+        is_correct = bool(grade.get("correct")) and raw_score >= 70.0
+
+    binary_score = 100.0 if is_correct else 0.0
+
+    return {
+        "question_id": item["question_id"],
+        "order_index": int(item.get("order_index") or 0),
+        "display_order": int(item.get("display_order") or 0),
+        "score": binary_score if LEVEL_EXAM_BINARY_SCORING else raw_score,
+        "raw_score": raw_score,
+        "correct": is_correct,
+        "feedback": str(grade.get("feedback") or _default_feedback(is_correct)),
+        "missing_points": grade.get("missing_points")
+        if isinstance(grade.get("missing_points"), list)
+        else [],
+        "grading_source": grade.get("grading_source") or "normalized",
+        "provider_parse_fallback": bool(grade.get("provider_parse_fallback")),
+        "provider_failure_fallback": bool(grade.get("provider_failure_fallback")),
+    }
 
 
 
@@ -362,22 +530,41 @@ def _fetch_attempt(supabase, attempt_id: str) -> dict[str, Any]:
 
 
 def _fetch_questions(supabase, assessment_id: str, difficulty: Optional[str]) -> list[dict[str, Any]]:
-    """Fetch only the 12 questions for the attempt difficulty.
+    """Fetch the correct level questions for the attempt difficulty.
 
-    Current DB shape stores 36 questions per level assessment:
-      easy: order_index 1-12
-      mid:  order_index 13-24
-      hard: order_index 25-36
+    Supports both DB shapes:
+    1) One assessment has 36 questions:
+       easy 1-12, mid 13-24, hard 25-36.
+    2) Each difficulty has its own assessment row:
+       questions can be order_index 1-12 with difficulty set on rows.
 
-    This prevents the grader from grading the wrong tier or averaging across
-    all 36 questions.
+    This avoids grading the wrong tier or accidentally mixing difficulties.
     """
-    start_order, end_order = _difficulty_order_range(difficulty)
+    normalized_difficulty = (difficulty or "").strip().lower()
+    start_order, end_order = _difficulty_order_range(normalized_difficulty)
 
+    # First try explicit difficulty column if it exists/is populated.
+    if normalized_difficulty in {"easy", "mid", "hard"}:
+        try:
+            by_difficulty = (
+                supabase.table("level_assessment_questions")
+                .select("id, question_text, ai_grading_rubric, order_index, difficulty")
+                .eq("assessment_id", assessment_id)
+                .eq("difficulty", normalized_difficulty)
+                .order("order_index")
+                .execute()
+            )
+            questions = by_difficulty.data or []
+            if questions:
+                return questions
+        except Exception as exc:
+            logger.warning("Fetch by difficulty failed, trying order range: %s", exc)
+
+    # Then try historical order ranges.
     try:
         query = (
             supabase.table("level_assessment_questions")
-            .select("id, question_text, ai_grading_rubric, order_index")
+            .select("id, question_text, ai_grading_rubric, order_index, difficulty")
             .eq("assessment_id", assessment_id)
         )
 
@@ -399,15 +586,14 @@ def _fetch_questions(supabase, assessment_id: str, difficulty: Optional[str]) ->
         )
 
     questions = res.data or []
-
     if questions:
         return questions
 
-    # Fallback only for old/dirty data where difficulty order ranges were not inserted.
+    # Last fallback: all questions for the assessment. This is only for dirty/old data.
     try:
         fallback = (
             supabase.table("level_assessment_questions")
-            .select("id, question_text, ai_grading_rubric, order_index")
+            .select("id, question_text, ai_grading_rubric, order_index, difficulty")
             .eq("assessment_id", assessment_id)
             .order("order_index")
             .execute()
@@ -589,7 +775,7 @@ def _local_grade_fallback(items: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "questions": grades,
         "overall_feedback": (
-            "Graded with conservative local rubric fallback because the AI provider chain was unavailable."
+            "Some answers were graded with local keyword fallback because provider output was unavailable or unparsable."
         ),
     }
 
