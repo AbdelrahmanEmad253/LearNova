@@ -3,7 +3,7 @@
 Design goals:
 - No single provider should be a point of failure.
 - Support OpenAI-compatible providers including NaraRouter, OpenRouter, Groq,
-  GitHub Models, and xAI.
+  GitHub Models, and xAI....
 - Expose a safe provider_status() snapshot for /health without leaking keys.
 """
 from __future__ import annotations
