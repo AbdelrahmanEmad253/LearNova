@@ -3,16 +3,25 @@
 // Location: supabase/functions/consume-resource/index.ts
 // ============================================================
 //
-// Purpose:
-// - Logs topic resource consumption.
-// - Awards XP once per (user, topic, resource_type).
-// - Updates streak state.
-// - Ensures student_progress.format_served is never null.
+// Resource-level completion fix:
+// - Flutter should send resource_id = topic_resources.id.
+// - The function logs completion by resource_id, not only topic_id + resource_type.
+// - This prevents one file/video from marking all resources under the same topic completed.
 //
-// Important:
-// - format_served/resource_type must be one of: Visual, Auditory, Textual.
-// - student_resource_logs keeps per-format history.
-// - student_progress keeps the topic-level progress row and the latest/served format.
+// Preferred request body:
+// {
+//   "resource_id": "topic_resources.id",
+//   "is_topic_completion": false,
+//   "timezone_offset": 3
+// }
+//
+// Legacy request body still works, but should be avoided:
+// {
+//   "topic_id": "topics.id",
+//   "resource_type": "Textual",
+//   "is_topic_completion": false,
+//   "timezone_offset": 3
+// }
 // ============================================================
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -25,23 +34,10 @@ type ResourceType = "Visual" | "Auditory" | "Textual";
 
 function normalizeResourceType(value: unknown): ResourceType | null {
   if (typeof value !== "string") return null;
-
   const normalized = value.trim().toLowerCase();
-
   if (normalized === "visual" || normalized === "v") return "Visual";
   if (normalized === "auditory" || normalized === "audio" || normalized === "a") return "Auditory";
-  if (
-    normalized === "textual" ||
-    normalized === "text" ||
-    normalized === "reading" ||
-    normalized === "read/write" ||
-    normalized === "read_write" ||
-    normalized === "readwrite" ||
-    normalized === "r"
-  ) {
-    return "Textual";
-  }
-
+  if (["textual", "text", "reading", "read/write", "read_write", "readwrite", "r"].includes(normalized)) return "Textual";
   return null;
 }
 
@@ -60,6 +56,7 @@ Deno.serve(async (req: Request) => {
   if (req.method !== "POST") return respond({ error: "Method not allowed" }, 405);
 
   let body: {
+    resource_id?: string;
     topic_id?: string;
     resource_type?: string;
     is_topic_completion?: boolean;
@@ -70,21 +67,6 @@ Deno.serve(async (req: Request) => {
     body = await req.json();
   } catch {
     return respond({ error: "Invalid JSON body" }, 400);
-  }
-
-  const { topic_id, is_topic_completion = false, timezone_offset = 0 } = body;
-  const resourceType = normalizeResourceType(body.resource_type);
-
-  if (!topic_id) return respond({ error: "topic_id is required" }, 400);
-
-  if (!resourceType) {
-    return respond(
-      {
-        error: "resource_type is required and must be Visual, Auditory, or Textual",
-        received: body.resource_type ?? null,
-      },
-      400,
-    );
   }
 
   const authHeader = req.headers.get("Authorization");
@@ -104,55 +86,78 @@ Deno.serve(async (req: Request) => {
   const studentId = user.id;
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
+  const resourceId = body.resource_id ?? null;
+  const isTopicCompletion = body.is_topic_completion === true;
+  const timezoneOffset = typeof body.timezone_offset === "number" ? body.timezone_offset : 0;
+
+  let topicId = body.topic_id ?? null;
+  let resourceType = normalizeResourceType(body.resource_type);
+
+  // Preferred path: derive topic_id + format_type from topic_resources.id.
+  if (resourceId) {
+    const { data: resourceRow, error: resourceError } = await supabase
+      .from("topic_resources")
+      .select("id, topic_id, format_type")
+      .eq("id", resourceId)
+      .maybeSingle();
+
+    if (resourceError) {
+      return respond({ error: "Failed to read topic resource", details: resourceError.message }, 500);
+    }
+
+    if (!resourceRow) {
+      return respond({ error: "resource_id was not found in topic_resources", resource_id: resourceId }, 404);
+    }
+
+    topicId = resourceRow.topic_id;
+    resourceType = normalizeResourceType(resourceRow.format_type);
+  }
+
+  if (!topicId) return respond({ error: "topic_id is required when resource_id is not provided" }, 400);
+  if (!resourceType) return respond({ error: "resource_type must be Visual, Auditory, or Textual" }, 400);
+
   const serverNow = new Date();
   const nowIso = serverNow.toISOString();
 
-  // ── Keep student_progress safe even if this call becomes duplicate ─────
-  // This is the main fix for recurring null format_served rows.
+  // Topic-level progress remains topic-level. Do not mark completed unless Flutter says the topic is completed.
   const progressResult = await ensureStudentProgress({
     supabase,
     userId: studentId,
-    topicId: topic_id,
+    topicId,
     resourceType,
-    isTopicCompletion: is_topic_completion,
+    isTopicCompletion,
     nowIso,
   });
 
   if (!progressResult.ok) {
-    return respond(
-      {
-        error: "Failed to update student_progress",
-        details: progressResult.error,
-      },
-      500,
-    );
+    return respond({ error: "Failed to update student_progress", details: progressResult.error }, 500);
   }
 
-  // ── Prevent Duplicate XP Grinding ────────────────────────────
-  // Ensure the student hasn't already claimed XP for this exact resource type in this topic.
-  const { data: existingLog, error: existingLogError } = await supabase
+  // Resource-level duplicate check.
+  let existingLogQuery = supabase
     .from("student_resource_logs")
     .select("id")
     .eq("user_id", studentId)
-    .eq("topic_id", topic_id)
-    .eq("resource_type", resourceType)
-    .maybeSingle();
+    .limit(1);
 
-  if (existingLogError) {
-    return respond(
-      {
-        error: "Failed to check existing resource log",
-        details: existingLogError.message,
-      },
-      500,
-    );
+  if (resourceId) {
+    existingLogQuery = existingLogQuery.eq("resource_id", resourceId);
+  } else {
+    existingLogQuery = existingLogQuery.eq("topic_id", topicId).eq("resource_type", resourceType).is("resource_id", null);
   }
 
-  if (existingLog) {
+  const { data: existingRows, error: existingError } = await existingLogQuery;
+
+  if (existingError) {
+    return respond({ error: "Failed to check existing resource log", details: existingError.message }, 500);
+  }
+
+  if (existingRows && existingRows.length > 0) {
     return respond(
       {
         message: "Resource already consumed. No duplicate XP awarded.",
-        topic_id,
+        resource_id: resourceId,
+        topic_id: topicId,
         resource_type: resourceType,
         student_progress_updated: true,
       },
@@ -160,16 +165,13 @@ Deno.serve(async (req: Request) => {
     );
   }
 
-  // ── Calculate Micro-Dosing XP ──────────────────────────────
   const BASE_RESOURCE_XP = 5;
   const TOPIC_COMPLETION_BONUS = 15;
   let earnedXp = BASE_RESOURCE_XP;
+  if (isTopicCompletion) earnedXp += TOPIC_COMPLETION_BONUS;
 
-  if (is_topic_completion) earnedXp += TOPIC_COMPLETION_BONUS;
-
-  // ── Read current streak state ────────────────────────────────
-  const localTime = new Date(serverNow.getTime() + timezone_offset * 60 * 60 * 1000);
-  const localDateStr = localTime.toISOString().split("T")[0]; // YYYY-MM-DD
+  const localTime = new Date(serverNow.getTime() + timezoneOffset * 60 * 60 * 1000);
+  const localDateStr = localTime.toISOString().split("T")[0];
 
   const { data: streakData } = await supabase
     .from("user_streaks")
@@ -177,22 +179,18 @@ Deno.serve(async (req: Request) => {
     .eq("user_id", studentId)
     .maybeSingle();
 
-  // ── Compute the correct new streak state ─────────────────────
   let streakMultiplier = 1.0;
   let newStreakDays: number;
   let newLongestStreak: number;
 
   if (!streakData || !streakData.last_activity_date) {
-    // First-ever activity for this student. Start the streak at 1.
     newStreakDays = 1;
     newLongestStreak = 1;
     streakMultiplier = 1.1;
   } else {
-    // Compare calendar dates, not raw timestamps.
     const lastActiveDate = new Date(streakData.last_activity_date + "T00:00:00Z");
     const todayDate = new Date(localDateStr + "T00:00:00Z");
-    const diffTime = todayDate.getTime() - lastActiveDate.getTime();
-    const diffDays = Math.round(diffTime / (1000 * 60 * 60 * 24));
+    const diffDays = Math.round((todayDate.getTime() - lastActiveDate.getTime()) / (1000 * 60 * 60 * 24));
 
     if (diffDays === 0) {
       newStreakDays = streakData.current_streak_days;
@@ -210,36 +208,28 @@ Deno.serve(async (req: Request) => {
 
   const finalXpAwarded = Math.round(earnedXp * streakMultiplier);
 
-  // ── Log the interaction and award XP ───────────────────────
   const { error: logInsertError } = await supabase.from("student_resource_logs").insert({
     user_id: studentId,
-    topic_id,
+    topic_id: topicId,
+    resource_id: resourceId,
     resource_type: resourceType,
     completed: true,
   });
 
   if (logInsertError) {
-    // If a race condition created the unique row between the duplicate check and insert,
-    // do not award XP twice.
     if (logInsertError.code === "23505") {
       return respond(
         {
           message: "Resource already consumed. No duplicate XP awarded.",
-          topic_id,
+          resource_id: resourceId,
+          topic_id: topicId,
           resource_type: resourceType,
           student_progress_updated: true,
         },
         200,
       );
     }
-
-    return respond(
-      {
-        error: "Failed to insert student_resource_logs row",
-        details: logInsertError.message,
-      },
-      500,
-    );
+    return respond({ error: "Failed to insert student_resource_logs row", details: logInsertError.message }, 500);
   }
 
   const { error: xpError } = await supabase.rpc("increment_xp", {
@@ -247,18 +237,9 @@ Deno.serve(async (req: Request) => {
     xp_amount: finalXpAwarded,
   });
 
-  if (xpError) {
-    return respond(
-      {
-        error: "Failed to award XP",
-        details: xpError.message,
-      },
-      500,
-    );
-  }
+  if (xpError) return respond({ error: "Failed to award XP", details: xpError.message }, 500);
 
-  // ── Write the corrected streak state ────────────────────────
-  const { error: streakUpsertError } = await supabase.from("user_streaks").upsert({
+  const { error: streakError } = await supabase.from("user_streaks").upsert({
     user_id: studentId,
     last_activity_date: localDateStr,
     current_streak_days: newStreakDays,
@@ -266,23 +247,13 @@ Deno.serve(async (req: Request) => {
     updated_at: nowIso,
   });
 
-  if (streakUpsertError) {
-    return respond(
-      {
-        error: "XP was awarded but streak update failed",
-        details: streakUpsertError.message,
-      },
-      500,
-    );
-  }
+  if (streakError) return respond({ error: "XP was awarded but streak update failed", details: streakError.message }, 500);
 
   return respond(
     {
-      topic_id,
+      resource_id: resourceId,
+      topic_id: topicId,
       resource_type: resourceType,
-      resource_xp: BASE_RESOURCE_XP,
-      completion_bonus: is_topic_completion ? TOPIC_COMPLETION_BONUS : 0,
-      streak_multiplier: streakMultiplier,
       xp_awarded: finalXpAwarded,
       current_streak_days: newStreakDays,
       longest_streak_days: newLongestStreak,
@@ -307,7 +278,7 @@ async function ensureStudentProgress({
   isTopicCompletion: boolean;
   nowIso: string;
 }): Promise<{ ok: true } | { ok: false; error: string }> {
-  const { data: progressRows, error: progressReadError } = await supabase
+  const { data: progressRows, error: readError } = await supabase
     .from("student_progress")
     .select("id, status, started_at, completed_at, format_served")
     .eq("user_id", userId)
@@ -315,29 +286,22 @@ async function ensureStudentProgress({
     .order("started_at", { ascending: true })
     .limit(1);
 
-  if (progressReadError) {
-    return { ok: false, error: progressReadError.message };
-  }
+  if (readError) return { ok: false, error: readError.message };
 
   const existingProgress = Array.isArray(progressRows) && progressRows.length > 0 ? progressRows[0] : null;
 
   if (existingProgress?.id) {
-    const nextStatus = isTopicCompletion ? "completed" : existingProgress.status ?? "in_progress";
-
     const { error: updateError } = await supabase
       .from("student_progress")
       .update({
-        status: nextStatus,
+        status: isTopicCompletion ? "completed" : existingProgress.status ?? "in_progress",
         format_served: resourceType,
         started_at: existingProgress.started_at ?? nowIso,
         completed_at: isTopicCompletion ? nowIso : existingProgress.completed_at,
       })
       .eq("id", existingProgress.id);
 
-    if (updateError) {
-      return { ok: false, error: updateError.message };
-    }
-
+    if (updateError) return { ok: false, error: updateError.message };
     return { ok: true };
   }
 
@@ -350,10 +314,7 @@ async function ensureStudentProgress({
     completed_at: isTopicCompletion ? nowIso : null,
   });
 
-  if (insertError) {
-    return { ok: false, error: insertError.message };
-  }
-
+  if (insertError) return { ok: false, error: insertError.message };
   return { ok: true };
 }
 
