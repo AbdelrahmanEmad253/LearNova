@@ -26,6 +26,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("level_exam_grader")
 
 PASSING_SCORE = float(os.getenv("LEVEL_EXAM_PASSING_SCORE", "60"))
+LEVEL_EXAM_BINARY_SCORING = os.getenv("LEVEL_EXAM_BINARY_SCORING", "true").lower() != "false"
 APP_API_KEY = os.getenv("LEVEL_GRADER_API_KEY")
 
 app = FastAPI(title="LearNova ML-AI Level Exam Grader")
@@ -78,7 +79,7 @@ def health() -> dict[str, Any]:
         "ok": True,
         "service": "level_exam_grader",
         "route": "/grade-level-attempt",
-        "build_marker": "level-grader-mitchy-hint-column-fix-002",
+        "build_marker": "level-grader-deterministic-scoring-fix-003",
         "has_level_grader_api_key": bool(APP_API_KEY),
         "has_supabase_url": bool(os.getenv("SUPABASE_URL")),
         "has_supabase_service_role_key": bool(os.getenv("SUPABASE_SERVICE_ROLE_KEY")),
@@ -116,7 +117,7 @@ def grade_level_attempt(payload: GradeRequest, x_api_key: Optional[str] = Header
             question_count=0,
         )
 
-    questions = _fetch_questions(supabase, attempt["assessment_id"])
+    questions = _fetch_questions(supabase, attempt["assessment_id"], attempt.get("difficulty"))
 
     if not questions:
         raise HTTPException(
@@ -131,14 +132,28 @@ def grade_level_attempt(payload: GradeRequest, x_api_key: Optional[str] = Header
     normalized_answers = _normalize_answers(attempt.get("answers") or {})
 
     grading_items: list[dict[str, Any]] = []
-    for q in questions:
+    for display_order, q in enumerate(questions, start=1):
         qid = q["id"]
-        order_key = str(q.get("order_index"))
-        answer = normalized_answers.get(qid) or normalized_answers.get(order_key) or ""
+        db_order_key = str(q.get("order_index"))
+        display_order_key = str(display_order)
+
+        # Flutter may submit answers by:
+        # 1) actual question_id
+        # 2) DB order_index
+        # 3) displayed order 1..12 after filtering by difficulty
+        answer = (
+            normalized_answers.get(qid)
+            or normalized_answers.get(db_order_key)
+            or normalized_answers.get(display_order_key)
+            or normalized_answers.get(f"q{display_order_key}")
+            or ""
+        )
+
         grading_items.append(
             {
                 "question_id": qid,
                 "order_index": q.get("order_index"),
+                "display_order": display_order,
                 "question_text": q.get("question_text"),
                 "rubric": _safe_json_or_text(q.get("ai_grading_rubric")),
                 "student_answer": str(answer).strip(),
@@ -157,10 +172,11 @@ def grade_level_attempt(payload: GradeRequest, x_api_key: Optional[str] = Header
         {
             "task": "Grade these written level exam answers.",
             "grading_rules": [
-                "Use score 0-100 per question.",
-                "correct=true if score >= 70 for that question.",
-                "Be fair to paraphrasing and different writing styles.",
-                "If the answer is empty or unrelated, score 0.",
+                "Grade each question independently against its rubric.",
+                "Use strict binary correctness for final scoring: correct answers should receive 100, incorrect answers should receive 0.",
+                "Set correct=true only when the answer contains the required rubric meaning.",
+                "Do not give high scores for vague, incomplete, or unrelated answers.",
+                "If the answer is empty or unrelated, score 0 and correct=false.",
                 "Feedback should be concise and actionable.",
             ],
             "questions": grading_items,
@@ -178,7 +194,14 @@ def grade_level_attempt(payload: GradeRequest, x_api_key: Optional[str] = Header
         provider, model = "local_rubric_fallback", "keyword_overlap"
 
     question_grades = _validate_question_grades(parsed, grading_items)
-    overall_score = round(sum(q["score"] for q in question_grades) / len(question_grades), 2)
+
+    if LEVEL_EXAM_BINARY_SCORING:
+        correct_count = sum(1 for q in question_grades if q.get("correct") is True)
+        overall_score = round((correct_count / len(question_grades)) * 100, 2)
+    else:
+        correct_count = sum(1 for q in question_grades if q.get("correct") is True)
+        overall_score = round(sum(q["score"] for q in question_grades) / len(question_grades), 2)
+
     passed = overall_score >= PASSING_SCORE
     feedback = parsed.get("overall_feedback") or _build_overall_feedback(question_grades, overall_score)
 
@@ -189,6 +212,9 @@ def grade_level_attempt(payload: GradeRequest, x_api_key: Optional[str] = Header
         "grade_breakdown": {
             "provider": provider,
             "model": model,
+            "binary_scoring": LEVEL_EXAM_BINARY_SCORING,
+            "correct_count": correct_count,
+            "total_questions": len(question_grades),
             "questions": question_grades,
         },
         "grading_status": "graded",
@@ -256,15 +282,30 @@ def _fetch_attempt(supabase, attempt_id: str) -> dict[str, Any]:
     return res.data
 
 
-def _fetch_questions(supabase, assessment_id: str) -> list[dict[str, Any]]:
+def _fetch_questions(supabase, assessment_id: str, difficulty: Optional[str]) -> list[dict[str, Any]]:
+    """Fetch only the 12 questions for the attempt difficulty.
+
+    Current DB shape stores 36 questions per level assessment:
+      easy: order_index 1-12
+      mid:  order_index 13-24
+      hard: order_index 25-36
+
+    This prevents the grader from grading the wrong tier or averaging across
+    all 36 questions.
+    """
+    start_order, end_order = _difficulty_order_range(difficulty)
+
     try:
-        res = (
+        query = (
             supabase.table("level_assessment_questions")
             .select("id, question_text, ai_grading_rubric, order_index")
             .eq("assessment_id", assessment_id)
-            .order("order_index")
-            .execute()
         )
+
+        if start_order is not None and end_order is not None:
+            query = query.gte("order_index", start_order).lte("order_index", end_order)
+
+        res = query.order("order_index").execute()
     except Exception as exc:
         logger.exception("Failed to fetch level_assessment_questions")
         raise HTTPException(
@@ -272,11 +313,57 @@ def _fetch_questions(supabase, assessment_id: str) -> list[dict[str, Any]]:
             detail={
                 "error": "Failed to fetch level assessment questions",
                 "assessment_id": assessment_id,
+                "difficulty": difficulty,
+                "order_range": [start_order, end_order],
                 "exception": str(exc),
             },
         )
 
-    return res.data or []
+    questions = res.data or []
+
+    if questions:
+        return questions
+
+    # Fallback only for old/dirty data where difficulty order ranges were not inserted.
+    try:
+        fallback = (
+            supabase.table("level_assessment_questions")
+            .select("id, question_text, ai_grading_rubric, order_index")
+            .eq("assessment_id", assessment_id)
+            .order("order_index")
+            .execute()
+        )
+    except Exception:
+        raise
+
+    fallback_questions = fallback.data or []
+
+    if fallback_questions:
+        logger.warning(
+            "No questions found for assessment_id=%s difficulty=%s order_range=%s-%s; using all %s questions as fallback.",
+            assessment_id,
+            difficulty,
+            start_order,
+            end_order,
+            len(fallback_questions),
+        )
+
+    return fallback_questions
+
+
+def _difficulty_order_range(difficulty: Optional[str]) -> tuple[Optional[int], Optional[int]]:
+    normalized = (difficulty or "").strip().lower()
+
+    if normalized == "easy":
+        return 1, 12
+
+    if normalized in {"mid", "medium"}:
+        return 13, 24
+
+    if normalized == "hard":
+        return 25, 36
+
+    return None, None
 
 
 def _normalize_answers(raw: Any) -> dict[str, Any]:
@@ -333,16 +420,27 @@ def _validate_question_grades(parsed: dict[str, Any], items: list[dict[str, Any]
             grade = _local_grade_one(item)
 
         try:
-            score = max(0.0, min(100.0, float(grade.get("score", 0))))
+            raw_score = max(0.0, min(100.0, float(grade.get("score", 0))))
         except Exception:
-            score = 0.0
+            raw_score = 0.0
+
+        student_answer = str(item.get("student_answer") or "").strip()
+
+        # Binary correctness prevents cases like:
+        # 2 deliberately correct answers + several partial wrong answers => 82%.
+        # A question is counted correct only if the grader score is at least 70
+        # and the answer is not empty.
+        is_correct = bool(student_answer) and raw_score >= 70.0
+        binary_score = 100.0 if is_correct else 0.0
 
         out.append(
             {
                 "question_id": item["question_id"],
                 "order_index": int(item.get("order_index") or 0),
-                "score": score,
-                "correct": bool(grade.get("correct", score >= 70)),
+                "display_order": int(item.get("display_order") or 0),
+                "score": binary_score if LEVEL_EXAM_BINARY_SCORING else raw_score,
+                "raw_score": raw_score,
+                "correct": is_correct,
                 "feedback": str(grade.get("feedback") or "Reviewed against the rubric."),
                 "missing_points": grade.get("missing_points")
                 if isinstance(grade.get("missing_points"), list)
