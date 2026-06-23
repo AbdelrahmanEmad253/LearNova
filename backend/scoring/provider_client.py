@@ -1,17 +1,10 @@
-"""Provider chain for grading/hint generation.
+"""Provider chain for level grading and backend AI scoring.
 
-Design goal: no single provider should be a point of failure.
-
-Supported providers:
-- nararouter: OpenAI-compatible NaraRouter / Naraya Router
-- groq: OpenAI-compatible Groq endpoint
-- gemini: native Gemini API
-- openrouter: OpenRouter OpenAI-compatible endpoint
-- xai: xAI/Grok OpenAI-compatible endpoint
-- github: GitHub Models OpenAI-compatible endpoint
-
-Recommended Railway env:
-AI_PROVIDER_ORDER=nararouter,groq,gemini,openrouter,xai
+Design goals:
+- No single provider should be a point of failure.
+- Support OpenAI-compatible providers including NaraRouter, OpenRouter, Groq,
+  GitHub Models, and xAI.
+- Expose a safe provider_status() snapshot for /health without leaking keys.
 """
 from __future__ import annotations
 
@@ -36,7 +29,8 @@ class ProviderResult:
 
 class ProviderChainError(RuntimeError):
     def __init__(self, errors: list[str]):
-        super().__init__(" | ".join(errors))
+        message = "AI provider chain unavailable: " + " | ".join(errors)
+        super().__init__(message)
         self.errors = errors
 
 
@@ -54,90 +48,86 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-TIMEOUT = _env_int("AI_PROVIDER_TIMEOUT_SECONDS", 25)
-MAX_TOKENS = _env_int("AI_PROVIDER_MAX_TOKENS", 1400)
+TIMEOUT = _env_int("AI_PROVIDER_TIMEOUT_SECONDS", 35)
+MAX_TOKENS = _env_int("AI_PROVIDER_MAX_TOKENS", 1800)
 TEMPERATURE = _env_float("AI_PROVIDER_TEMPERATURE", 0.0)
 
 
-def _normalize_provider_name(provider: str) -> str:
-    provider = provider.strip().lower()
-    aliases = {
-        "grok": "xai",
-        "nara": "nararouter",
-        "naraya": "nararouter",
-        "nara-router": "nararouter",
-        "nara_router": "nararouter",
-    }
-    return aliases.get(provider, provider)
-
-
 def provider_order() -> list[str]:
-    raw = os.getenv("AI_PROVIDER_ORDER", "nararouter,groq,gemini,openrouter,xai")
+    raw = os.getenv("AI_PROVIDER_ORDER", "nararouter,groq,gemini,openrouter,github,xai")
     providers: list[str] = []
+
     for item in raw.split(","):
-        provider = _normalize_provider_name(item)
-        if provider and provider not in providers:
+        provider = item.strip().lower()
+        if not provider:
+            continue
+
+        if provider == "grok":
+            provider = "xai"
+
+        if provider not in providers:
             providers.append(provider)
+
     return providers
 
 
-def _chat_completions_url(base_or_full_url: str) -> str:
-    """
-    Accepts either:
-    - https://router.naraya.ai/v1
-    - https://router.naraya.ai/v1/chat/completions
-    """
-    url = base_or_full_url.rstrip("/")
-    if url.endswith("/chat/completions"):
-        return url
-    return f"{url}/chat/completions"
+def _has_env(*names: str) -> bool:
+    return any(bool(os.getenv(name)) for name in names)
 
 
-def generate_text(
-    system_prompt: str,
-    user_prompt: str,
-    *,
-    json_schema: Optional[dict] = None,
-) -> ProviderResult:
+def provider_status() -> dict[str, Any]:
+    """Safe debug snapshot for /health. Does not expose API keys."""
+    return {
+        "provider_order": provider_order(),
+        "configured": {
+            "nararouter": _has_env("NARAROUTER_API_KEY"),
+            "groq": _has_env("GROQ_API_KEY"),
+            "gemini": _has_env("GEMINI_API_KEY"),
+            "openrouter": _has_env("OPENROUTER_API_KEY"),
+            "github": _has_env("GITHUB_MODELS_API_KEY", "GITHUB_TOKEN"),
+            "xai": _has_env("XAI_API_KEY", "GROK_API_KEY"),
+            "generic_openai_compatible": _has_env("AI_API_KEY") and bool(os.getenv("AI_BASE_URL")) and bool(os.getenv("AI_MODEL")),
+        },
+        "models": {
+            "nararouter": os.getenv("NARAROUTER_GRADER_MODEL") or os.getenv("NARAROUTER_MODEL"),
+            "groq": os.getenv("GROQ_MODEL"),
+            "gemini": os.getenv("GEMINI_MODEL"),
+            "openrouter": os.getenv("OPENROUTER_MODEL"),
+            "github": os.getenv("GITHUB_MODEL"),
+            "xai": os.getenv("XAI_MODEL") or os.getenv("GROK_MODEL"),
+            "generic": os.getenv("AI_MODEL"),
+        },
+        "timeout_seconds": TIMEOUT,
+        "max_tokens": MAX_TOKENS,
+        "temperature": TEMPERATURE,
+    }
+
+
+def generate_text(system_prompt: str, user_prompt: str, *, json_schema: Optional[dict] = None) -> ProviderResult:
     errors: list[str] = []
 
     for provider in provider_order():
         try:
-            if provider == "nararouter":
+            if provider in {"primary", "generic"}:
                 return _call_openai_compatible(
-                    provider="nararouter",
-                    base_url=(
-                        os.getenv("NARAROUTER_BASE_URL")
-                        or os.getenv("NARAROUTER_API_ENDPOINT")
-                        or os.getenv("NARAROUTER_ENDPOINT")
-                        or "https://router.naraya.ai/v1"
-                    ),
-                    api_key=(
-                        os.getenv("NARAROUTER_API_KEY")
-                        or os.getenv("NARA_API_KEY")
-                        or os.getenv("NARAYA_API_KEY")
-                    ),
-                    model=(
-                        os.getenv("NARAROUTER_GRADER_MODEL")
-                        or os.getenv("NARAROUTER_SCORING_MODEL")
-                        or os.getenv("NARAROUTER_MODEL")
-                        or "claude-sonnet-4.5"
-                    ),
+                    provider="generic",
+                    base_url=os.getenv("AI_BASE_URL", ""),
+                    api_key=os.getenv("AI_API_KEY"),
+                    model=os.getenv("AI_MODEL", ""),
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     json_schema=json_schema,
-                    # Many router/model combinations accept plain prompt JSON better
-                    # than OpenAI strict response_format. If NaraRouter confirms support,
-                    # set NARAROUTER_USE_RESPONSE_FORMAT=true in Railway.
-                    use_response_format=_env_bool("NARAROUTER_USE_RESPONSE_FORMAT", False),
-                    extra_headers=_nararouter_headers(),
+                )
+
+            if provider == "nararouter":
+                return _call_openai_compatible(
+                    provider="nararouter",
+                    base_url=os.getenv("NARAROUTER_BASE_URL", "https://router.naraya.ai/v1"),
+                    api_key=os.getenv("NARAROUTER_API_KEY"),
+                    model=os.getenv("NARAROUTER_GRADER_MODEL") or os.getenv("NARAROUTER_MODEL", "claude-sonnet-4.5"),
+                    system_prompt=system_prompt,
+                    user_prompt=user_prompt,
+                    json_schema=json_schema,
                 )
 
             if provider == "groq":
@@ -177,38 +167,26 @@ def generate_text(
                     json_schema=json_schema,
                 )
 
-            if provider == "gemini":
-                return _call_gemini(system_prompt, user_prompt, json_schema=json_schema)
-
             if provider == "xai":
                 return _call_openai_compatible(
                     provider="xai",
-                    base_url=os.getenv("XAI_BASE_URL") or os.getenv("XAI_API_URL") or "https://api.x.ai/v1",
+                    base_url=os.getenv("XAI_API_URL", "https://api.x.ai/v1"),
                     api_key=os.getenv("XAI_API_KEY") or os.getenv("GROK_API_KEY"),
-                    model=os.getenv("XAI_MODEL") or os.getenv("GROK_MODEL") or "grok-3-mini",
+                    model=os.getenv("XAI_MODEL") or os.getenv("GROK_MODEL", "grok-3-mini"),
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     json_schema=json_schema,
                 )
 
-            errors.append(f"unknown provider '{provider}'")
+            if provider == "gemini":
+                return _call_gemini(system_prompt, user_prompt, json_schema=json_schema)
 
-        except Exception as exc:  # deliberately broad to continue chain
+            errors.append(f"{provider}: unsupported provider")
+        except Exception as exc:
             logger.warning("Provider %s failed: %s", provider, exc)
             errors.append(f"{provider}: {exc}")
 
-    raise ProviderChainError(errors)
-
-
-def _nararouter_headers() -> dict[str, str]:
-    headers: dict[str, str] = {}
-    site_url = os.getenv("NARAROUTER_SITE_URL")
-    app_name = os.getenv("NARAROUTER_APP_NAME", "LearNova ML-AI")
-    if site_url:
-        headers["HTTP-Referer"] = site_url
-    if app_name:
-        headers["X-Title"] = app_name
-    return headers
+    raise ProviderChainError(errors or ["No providers configured"])
 
 
 def _call_openai_compatible(
@@ -221,10 +199,15 @@ def _call_openai_compatible(
     user_prompt: str,
     json_schema: Optional[dict],
     extra_headers: Optional[dict[str, str]] = None,
-    use_response_format: bool = True,
 ) -> ProviderResult:
+    if not base_url:
+        raise RuntimeError(f"missing base URL for {provider}")
+
     if not api_key:
         raise RuntimeError(f"missing API key for {provider}")
+
+    if not model:
+        raise RuntimeError(f"missing model for {provider}")
 
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     if extra_headers:
@@ -240,6 +223,10 @@ def _call_openai_compatible(
         ],
     }
 
+    # Some OpenAI-compatible gateways do not support strict response_format.
+    # Keep it enabled by default but allow disabling from Railway env.
+    use_response_format = os.getenv(f"{provider.upper()}_USE_RESPONSE_FORMAT", os.getenv("AI_USE_RESPONSE_FORMAT", "true")).lower() != "false"
+
     if json_schema and use_response_format:
         payload["response_format"] = {
             "type": "json_schema",
@@ -250,30 +237,23 @@ def _call_openai_compatible(
             },
         }
 
-    resp = requests.post(
-        _chat_completions_url(base_url),
-        headers=headers,
-        json=payload,
-        timeout=TIMEOUT,
-    )
+    url = f"{base_url.rstrip('/')}/chat/completions"
+
+    resp = requests.post(url, headers=headers, json=payload, timeout=TIMEOUT)
 
     if resp.status_code >= 400:
-        raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:500]}")
+        raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:700]}")
 
     data = resp.json()
     text = data["choices"][0]["message"].get("content") or ""
+
     if not text.strip():
         raise RuntimeError("empty response")
 
     return ProviderResult(provider=provider, model=model, text=text)
 
 
-def _call_gemini(
-    system_prompt: str,
-    user_prompt: str,
-    *,
-    json_schema: Optional[dict],
-) -> ProviderResult:
+def _call_gemini(system_prompt: str, user_prompt: str, *, json_schema: Optional[dict]) -> ProviderResult:
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError("missing GEMINI_API_KEY")
@@ -284,21 +264,28 @@ def _call_gemini(
     payload: Dict[str, Any] = {
         "systemInstruction": {"parts": [{"text": system_prompt}]},
         "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
-        "generationConfig": {"temperature": TEMPERATURE, "maxOutputTokens": MAX_TOKENS},
+        "generationConfig": {
+            "temperature": TEMPERATURE,
+            "maxOutputTokens": MAX_TOKENS,
+        },
     }
 
     if json_schema:
         payload["generationConfig"].update(
-            {"responseMimeType": "application/json", "responseSchema": json_schema}
+            {
+                "responseMimeType": "application/json",
+                "responseSchema": json_schema,
+            }
         )
 
     resp = requests.post(f"{url}?key={api_key}", json=payload, timeout=TIMEOUT)
 
     if resp.status_code >= 400:
-        raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:500]}")
+        raise RuntimeError(f"HTTP {resp.status_code}: {resp.text[:700]}")
 
     data = resp.json()
     text = data["candidates"][0]["content"]["parts"][0].get("text") or ""
+
     if not text.strip():
         raise RuntimeError("empty response")
 
@@ -307,6 +294,7 @@ def _call_gemini(
 
 def parse_json_object(text: str) -> dict[str, Any]:
     cleaned = text.strip()
+
     if cleaned.startswith("```"):
         cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned)
         cleaned = re.sub(r"\s*```$", "", cleaned)
@@ -315,6 +303,8 @@ def parse_json_object(text: str) -> dict[str, Any]:
         return json.loads(cleaned)
     except json.JSONDecodeError:
         start, end = cleaned.find("{"), cleaned.rfind("}")
+
         if start != -1 and end != -1 and end > start:
             return json.loads(cleaned[start : end + 1])
+
         raise
