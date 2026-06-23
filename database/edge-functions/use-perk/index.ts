@@ -10,37 +10,22 @@
 // - Deducts the perk only after confirming the question is a valid module MCQ question
 //   and the perk effect can be returned safely.
 //
-// Request body:
-// {
-//   "perk_type": "owl_hint" | "sly_fox",
-//   "question_id": "module_assessment_questions.id"
-// }
-//
-// Response examples:
-// Owl:
-// {
-//   "ok": true,
-//   "perk_type": "owl_hint",
-//   "remaining": 1,
-//   "question_source": "module_assessment_questions",
-//   "effect": {
-//     "type": "hint",
-//     "hint": "Think about..."
-//   }
-// }
-//
-// Sly Fox:
-// {
-//   "ok": true,
-//   "perk_type": "sly_fox",
-//   "remaining": 1,
-//   "question_source": "module_assessment_questions",
-//   "effect": {
-//     "type": "eliminate_option",
-//     "eliminated_option_key": "B",
-//     "eliminated_option_value": "Wrong answer text"
-//   }
-// }
+// Fix in this version:
+// - Sly Fox can now match correct_answer more flexibly.
+// - Supported correct_answer formats include:
+//   A / B / C / D
+//   a / b / c / d
+//   A. / B) / Option A / option_b
+//   0-based numeric index for array options: 0, 1, 2, 3
+//   1-based numeric index for array options: 1, 2, 3, 4
+//   full option text
+//   object values like { "answer": "B" } or { "correct_answer": "B" }
+// - Options can be:
+//   ["A text", "B text", "C text"]
+//   { "A": "A text", "B": "B text" }
+//   { "A": { "text": "A text" }, "B": { "text": "B text" } }
+//   [{ "text": "A text" }, { "text": "B text" }]
+//   values with embedded correctness flags like { "text": "...", "is_correct": true }
 // ============================================================
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -67,8 +52,22 @@ type ModuleQuestion = {
 
 type OptionCandidate = {
   key: string;
+  keyNormalized: string;
+  index: number;
   value: string;
+  valueNormalized: string;
+  raw: unknown;
+  embeddedCorrect: boolean;
   isCorrect: boolean;
+};
+
+type ParsedCorrectAnswer = {
+  raw: unknown;
+  normalized: string;
+  possibleKeys: Set<string>;
+  possibleTexts: Set<string>;
+  possibleIndexesZeroBased: Set<number>;
+  possibleIndexesOneBased: Set<number>;
 };
 
 Deno.serve(async (req: Request) => {
@@ -130,8 +129,6 @@ Deno.serve(async (req: Request) => {
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
   // ── Read the module MCQ question first ─────────────────────
-  // This is the key fix:
-  // perks are valid for module_assessment_questions, not level/challenge/diagnostic question tables.
   const { data: question, error: questionError } = await supabase
     .from("module_assessment_questions")
     .select("id, question_text, options, correct_answer, mitchy_hint")
@@ -178,6 +175,7 @@ Deno.serve(async (req: Request) => {
         reason: effectResult.reason,
         question_id: questionId,
         question_source: "module_assessment_questions",
+        debug: effectResult.debug ?? null,
       },
       200,
     );
@@ -252,7 +250,7 @@ Deno.serve(async (req: Request) => {
 
 function buildOwlHintEffect(question: ModuleQuestion):
   | { ok: true; effect: { type: "hint"; hint: string } }
-  | { ok: false; error: string; reason: string } {
+  | { ok: false; error: string; reason: string; debug?: Record<string, unknown> } {
   const hint = typeof question.mitchy_hint === "string" ? question.mitchy_hint.trim() : "";
 
   if (!hint) {
@@ -281,7 +279,7 @@ function buildSlyFoxEffect(question: ModuleQuestion):
         eliminated_option_value: string;
       };
     }
-  | { ok: false; error: string; reason: string } {
+  | { ok: false; error: string; reason: string; debug?: Record<string, unknown> } {
   const parsedOptions = parseOptions(question.options, question.correct_answer);
 
   if (!parsedOptions.ok) {
@@ -289,6 +287,7 @@ function buildSlyFoxEffect(question: ModuleQuestion):
       ok: false,
       error: parsedOptions.error,
       reason: parsedOptions.reason,
+      debug: parsedOptions.debug,
     };
   }
 
@@ -299,6 +298,9 @@ function buildSlyFoxEffect(question: ModuleQuestion):
       ok: false,
       error: "Sly Fox could not safely find an incorrect option to eliminate.",
       reason: "no_wrong_options_found",
+      debug: {
+        options: parsedOptions.options.map(debugOption),
+      },
     };
   }
 
@@ -319,17 +321,7 @@ function parseOptions(
   rawCorrectAnswer: unknown,
 ):
   | { ok: true; options: OptionCandidate[] }
-  | { ok: false; error: string; reason: string } {
-  const correctAnswer = normalizeAnswer(rawCorrectAnswer);
-
-  if (!correctAnswer) {
-    return {
-      ok: false,
-      error: "Sly Fox requires a correct_answer value on the module question.",
-      reason: "missing_correct_answer",
-    };
-  }
-
+  | { ok: false; error: string; reason: string; debug?: Record<string, unknown> } {
   let options = rawOptions;
 
   if (typeof options === "string") {
@@ -340,6 +332,10 @@ function parseOptions(
         ok: false,
         error: "Sly Fox requires options to be valid JSON.",
         reason: "options_not_json",
+        debug: {
+          raw_options_type: typeof rawOptions,
+          raw_options_preview: String(rawOptions).slice(0, 500),
+        },
       };
     }
   }
@@ -348,25 +344,32 @@ function parseOptions(
 
   if (Array.isArray(options)) {
     options.forEach((value, index) => {
-      const key = indexToOptionKey(index);
-      const textValue = stringifyOptionValue(value);
+      const key = extractOptionKeyFromRaw(value) || indexToOptionKey(index);
+      const textValue = extractOptionText(value);
       candidates.push({
         key,
+        keyNormalized: normalizeKey(key),
+        index,
         value: textValue,
-        isCorrect:
-          normalizeAnswer(key) === correctAnswer ||
-          normalizeAnswer(textValue) === correctAnswer,
+        valueNormalized: normalizeText(textValue),
+        raw: value,
+        embeddedCorrect: extractEmbeddedCorrectFlag(value),
+        isCorrect: false,
       });
     });
   } else if (options && typeof options === "object") {
-    Object.entries(options as Record<string, unknown>).forEach(([key, value]) => {
-      const textValue = stringifyOptionValue(value);
+    Object.entries(options as Record<string, unknown>).forEach(([key, value], index) => {
+      const extractedKey = extractOptionKeyFromRaw(value) || key;
+      const textValue = extractOptionText(value);
       candidates.push({
-        key,
+        key: extractedKey,
+        keyNormalized: normalizeKey(extractedKey),
+        index,
         value: textValue,
-        isCorrect:
-          normalizeAnswer(key) === correctAnswer ||
-          normalizeAnswer(textValue) === correctAnswer,
+        valueNormalized: normalizeText(textValue),
+        raw: value,
+        embeddedCorrect: extractEmbeddedCorrectFlag(value),
+        isCorrect: false,
       });
     });
   } else {
@@ -374,6 +377,9 @@ function parseOptions(
       ok: false,
       error: "Sly Fox requires MCQ options on the module question.",
       reason: "missing_or_invalid_options",
+      debug: {
+        raw_options_type: typeof rawOptions,
+      },
     };
   }
 
@@ -384,52 +390,361 @@ function parseOptions(
       ok: false,
       error: "Sly Fox requires at least two usable options.",
       reason: "not_enough_options",
+      debug: {
+        options_count: candidates.length,
+        usable_options_count: usableCandidates.length,
+      },
     };
   }
 
-  const correctCount = usableCandidates.filter((option) => option.isCorrect).length;
+  const correct = parseCorrectAnswer(rawCorrectAnswer, usableCandidates.length);
+
+  // First preference: embedded correctness flag inside options.
+  const embeddedCorrectCount = usableCandidates.filter((option) => option.embeddedCorrect).length;
+  if (embeddedCorrectCount === 1) {
+    usableCandidates.forEach((option) => {
+      option.isCorrect = option.embeddedCorrect;
+    });
+
+    return { ok: true, options: usableCandidates };
+  }
+
+  if (!correct.normalized && correct.possibleKeys.size === 0 && correct.possibleTexts.size === 0) {
+    return {
+      ok: false,
+      error: "Sly Fox requires a correct_answer value on the module question.",
+      reason: "missing_correct_answer",
+      debug: {
+        raw_correct_answer: rawCorrectAnswer,
+        options: usableCandidates.map(debugOption),
+      },
+    };
+  }
+
+  usableCandidates.forEach((option) => {
+    option.isCorrect = doesOptionMatchCorrectAnswer(option, correct, usableCandidates);
+  });
+
+  let correctCount = usableCandidates.filter((option) => option.isCorrect).length;
+
+  /*
+    Final fallback for common old-data shape:
+    correct_answer stores the literal answer text but with a leading label like:
+      "A. Central tendency"
+      "B) Variance"
+    If no match happened above, compare with option text after stripping labels.
+  */
+  if (correctCount === 0) {
+    const strippedCorrect = stripLeadingOptionLabel(correct.normalized);
+    usableCandidates.forEach((option) => {
+      if (stripLeadingOptionLabel(option.valueNormalized) === strippedCorrect) {
+        option.isCorrect = true;
+      }
+    });
+    correctCount = usableCandidates.filter((option) => option.isCorrect).length;
+  }
 
   if (correctCount === 0) {
     return {
       ok: false,
       error: "Sly Fox could not safely identify the correct answer, so it will not eliminate any option.",
       reason: "correct_answer_not_matched_to_options",
+      debug: {
+        raw_correct_answer: rawCorrectAnswer,
+        parsed_correct_answer: debugCorrectAnswer(correct),
+        options: usableCandidates.map(debugOption),
+      },
+    };
+  }
+
+  if (correctCount > 1) {
+    return {
+      ok: false,
+      error: "Sly Fox found more than one option matching the correct answer, so it will not eliminate any option.",
+      reason: "multiple_correct_answer_matches",
+      debug: {
+        raw_correct_answer: rawCorrectAnswer,
+        parsed_correct_answer: debugCorrectAnswer(correct),
+        options: usableCandidates.map(debugOption),
+      },
     };
   }
 
   return { ok: true, options: usableCandidates };
 }
 
-function normalizeAnswer(value: unknown): string {
+function parseCorrectAnswer(rawCorrectAnswer: unknown, optionCount: number): ParsedCorrectAnswer {
+  const extracted = extractCorrectAnswerValue(rawCorrectAnswer);
+  const normalized = normalizeText(extracted);
+
+  const possibleKeys = new Set<string>();
+  const possibleTexts = new Set<string>();
+  const possibleIndexesZeroBased = new Set<number>();
+  const possibleIndexesOneBased = new Set<number>();
+
+  if (normalized) {
+    possibleTexts.add(normalized);
+
+    const key = normalizeKey(normalized);
+    if (key) possibleKeys.add(key);
+
+    const optionKeyFromPhrase = extractOptionKeyFromPhrase(normalized);
+    if (optionKeyFromPhrase) possibleKeys.add(optionKeyFromPhrase);
+
+    const numberMatch = normalized.match(/^\d+$/);
+    if (numberMatch) {
+      const n = Number(normalized);
+
+      if (Number.isInteger(n)) {
+        if (n >= 0 && n < optionCount) possibleIndexesZeroBased.add(n);
+        if (n >= 1 && n <= optionCount) possibleIndexesOneBased.add(n - 1);
+      }
+    }
+  }
+
+  return {
+    raw: rawCorrectAnswer,
+    normalized,
+    possibleKeys,
+    possibleTexts,
+    possibleIndexesZeroBased,
+    possibleIndexesOneBased,
+  };
+}
+
+function extractCorrectAnswerValue(value: unknown): string {
   if (value === null || value === undefined) return "";
 
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+
+  if (typeof value === "object") {
+    const objectValue = value as Record<string, unknown>;
+
+    const preferredFields = [
+      "correct_answer",
+      "correctAnswer",
+      "answer",
+      "key",
+      "option",
+      "label",
+      "value",
+      "text",
+    ];
+
+    for (const field of preferredFields) {
+      const fieldValue = objectValue[field];
+      if (fieldValue !== null && fieldValue !== undefined && String(fieldValue).trim()) {
+        return String(fieldValue);
+      }
+    }
+
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+
+  return String(value);
+}
+
+function doesOptionMatchCorrectAnswer(
+  option: OptionCandidate,
+  correct: ParsedCorrectAnswer,
+  allOptions: OptionCandidate[],
+): boolean {
+  if (correct.possibleKeys.has(option.keyNormalized)) return true;
+  if (correct.possibleTexts.has(option.valueNormalized)) return true;
+
+  /*
+    Numeric correct_answer support:
+    - If correct_answer is 0, 1, 2, 3, it may be zero-based.
+    - If correct_answer is 1, 2, 3, 4, it may be one-based.
+    To avoid eliminating the true answer incorrectly when numeric labels are ambiguous,
+    only use numeric index fallback when it points to exactly one candidate and
+    no option text is exactly equal to that numeric value.
+  */
+  const numericTextAlreadyExistsAsOption = allOptions.some(
+    (candidate) => correct.possibleTexts.has(candidate.valueNormalized),
+  );
+
+  if (!numericTextAlreadyExistsAsOption) {
+    if (correct.possibleIndexesZeroBased.has(option.index)) return true;
+
+    // Only allow one-based fallback when zero-based did not already identify a different option.
+    if (
+      correct.possibleIndexesZeroBased.size === 0 &&
+      correct.possibleIndexesOneBased.has(option.index)
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function extractOptionText(value: unknown): string {
+  if (value === null || value === undefined) return "";
+
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return String(value);
+  }
+
+  if (typeof value === "object") {
+    const objectValue = value as Record<string, unknown>;
+
+    const preferredFields = [
+      "text",
+      "option_text",
+      "optionText",
+      "label",
+      "value",
+      "answer",
+      "content",
+      "title",
+    ];
+
+    for (const field of preferredFields) {
+      const fieldValue = objectValue[field];
+      if (fieldValue !== null && fieldValue !== undefined && String(fieldValue).trim()) {
+        return String(fieldValue);
+      }
+    }
+
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+
+  return String(value);
+}
+
+function extractOptionKeyFromRaw(value: unknown): string | null {
+  if (!value || typeof value !== "object") return null;
+
+  const objectValue = value as Record<string, unknown>;
+  const fields = ["key", "option_key", "optionKey", "letter", "label"];
+
+  for (const field of fields) {
+    const fieldValue = objectValue[field];
+    if (fieldValue !== null && fieldValue !== undefined && String(fieldValue).trim()) {
+      return String(fieldValue);
+    }
+  }
+
+  return null;
+}
+
+function extractEmbeddedCorrectFlag(value: unknown): boolean {
+  if (!value || typeof value !== "object") return false;
+
+  const objectValue = value as Record<string, unknown>;
+  const fields = ["is_correct", "isCorrect", "correct", "is_answer", "isAnswer"];
+
+  for (const field of fields) {
+    const fieldValue = objectValue[field];
+
+    if (fieldValue === true) return true;
+
+    if (typeof fieldValue === "string") {
+      const normalized = fieldValue.trim().toLowerCase();
+      if (["true", "yes", "1", "correct"].includes(normalized)) return true;
+    }
+
+    if (fieldValue === 1) return true;
+  }
+
+  return false;
+}
+
+function normalizeKey(value: string): string {
   let text = String(value).trim().toLowerCase();
 
-  // Convert common labels like "A.", "B)", "option C", "answer: D"
-  // into the bare option key when possible.
   text = text.replace(/^answer\s*:\s*/i, "").trim();
+  text = text.replace(/^correct\s*answer\s*:\s*/i, "").trim();
   text = text.replace(/^option\s+/i, "").trim();
+  text = text.replace(/^option[_-]/i, "").trim();
 
   const singleLetterMatch = text.match(/^([a-z])[\.\)]?$/);
   if (singleLetterMatch) return singleLetterMatch[1];
 
-  return text.replace(/\s+/g, " ");
+  return "";
 }
 
-function stringifyOptionValue(value: unknown): string {
+function extractOptionKeyFromPhrase(value: string): string {
+  let text = String(value).trim().toLowerCase();
+
+  text = text.replace(/^answer\s*:\s*/i, "").trim();
+  text = text.replace(/^correct\s*answer\s*:\s*/i, "").trim();
+
+  const patterns = [
+    /^option\s+([a-z])$/,
+    /^option[_-]([a-z])$/,
+    /^([a-z])[\.\)]\s+.+$/,
+    /^([a-z])\s*[-:]\s+.+$/,
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match) return match[1];
+  }
+
+  return "";
+}
+
+function normalizeText(value: unknown): string {
   if (value === null || value === undefined) return "";
 
-  if (typeof value === "string") return value;
+  let text = String(value).trim().toLowerCase();
 
-  if (typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
+  text = text.replace(/^answer\s*:\s*/i, "").trim();
+  text = text.replace(/^correct\s*answer\s*:\s*/i, "").trim();
+  text = text.replace(/\s+/g, " ");
 
-  try {
-    return JSON.stringify(value);
-  } catch {
-    return String(value);
-  }
+  return text;
+}
+
+function stripLeadingOptionLabel(value: string): string {
+  return String(value)
+    .trim()
+    .toLowerCase()
+    .replace(/^answer\s*:\s*/i, "")
+    .replace(/^correct\s*answer\s*:\s*/i, "")
+    .replace(/^option\s+[a-z][\.\)\-:]*\s*/i, "")
+    .replace(/^option[_-][a-z][\.\)\-:]*\s*/i, "")
+    .replace(/^[a-z][\.\)\-:]\s*/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function stringifySet(set: Set<string | number>): Array<string | number> {
+  return Array.from(set.values());
+}
+
+function debugCorrectAnswer(correct: ParsedCorrectAnswer): Record<string, unknown> {
+  return {
+    normalized: correct.normalized,
+    possible_keys: stringifySet(correct.possibleKeys),
+    possible_texts: stringifySet(correct.possibleTexts),
+    possible_indexes_zero_based: stringifySet(correct.possibleIndexesZeroBased),
+    possible_indexes_one_based: stringifySet(correct.possibleIndexesOneBased),
+  };
+}
+
+function debugOption(option: OptionCandidate): Record<string, unknown> {
+  return {
+    key: option.key,
+    key_normalized: option.keyNormalized,
+    index: option.index,
+    value: option.value,
+    value_normalized: option.valueNormalized,
+    embedded_correct: option.embeddedCorrect,
+    is_correct: option.isCorrect,
+  };
 }
 
 function indexToOptionKey(index: number): string {
