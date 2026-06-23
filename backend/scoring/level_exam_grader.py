@@ -78,7 +78,7 @@ def health() -> dict[str, Any]:
         "ok": True,
         "service": "level_exam_grader",
         "route": "/grade-level-attempt",
-        "build_marker": "level-grader-visible-update-001",
+        "build_marker": "level-grader-mitchy-hint-column-fix-002",
         "has_level_grader_api_key": bool(APP_API_KEY),
         "has_supabase_url": bool(os.getenv("SUPABASE_URL")),
         "has_supabase_service_role_key": bool(os.getenv("SUPABASE_SERVICE_ROLE_KEY")),
@@ -260,7 +260,7 @@ def _fetch_questions(supabase, assessment_id: str) -> list[dict[str, Any]]:
     try:
         res = (
             supabase.table("level_assessment_questions")
-            .select("id, question_text, ai_grading_rubric, mitchy_hint, mitchy_explanation, order_index")
+            .select("id, question_text, ai_grading_rubric, order_index")
             .eq("assessment_id", assessment_id)
             .order("order_index")
             .execute()
