@@ -21,6 +21,7 @@ from mitchy.parsing import parse_model_json
 from mitchy.progress_context import answer_progress_status_question
 from mitchy.prompting import build_mitchy_prompt
 from mitchy.provider_client import call_backup_provider
+from mitchy.risk_alerts import maybe_create_mitchy_risk_alert
 from mitchy.schemas import normalize_mitchy_output, profile_to_recommended_format
 from mitchy.user_context import build_user_context
 
@@ -226,6 +227,23 @@ def process_mitchy_message(user_id: str, message: str, user_email: Optional[str]
     final_output["metadata"]["chat_session_memory_attached"] = bool(session_turns)
     final_output = _force_non_empty_output(final_output, local_analysis, source="final_non_empty_guard", language=language)
     final_output = _polish_output_for_chat_context(final_output, clean_message=clean_message, has_history=bool(recent_turns))
+
+    try:
+        risk_alert_result = maybe_create_mitchy_risk_alert(
+            user_id=user_id,
+            user_email=user_email,
+            full_name=full_name,
+            profile=profile,
+            local_analysis=local_analysis,
+            final_output=final_output,
+            topic_id=topic_id,
+            module_id=module_id,
+            screen_context=screen_context,
+            provider_chain_error=provider_chain_error,
+        )
+        final_output.setdefault("metadata", {})["risk_alert_result"] = risk_alert_result
+    except Exception as exc:
+        final_output.setdefault("metadata", {})["risk_alert_error"] = f"{type(exc).__name__}: {str(exc)}"
 
     raw_model_output_for_db: Dict[str, Any] = {"raw_text": raw_model_text, "parsed": parsed_model_output, "provider_chain_error": provider_chain_error, "local_analysis": local_analysis}
     log_result = save_mitchy_interaction(
