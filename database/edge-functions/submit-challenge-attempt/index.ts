@@ -2,18 +2,27 @@
 // LearNova Edge Function: submit-challenge-attempt
 // ============================================================
 //
-// CHANGE LOG (this update, Section 4.4 of the handover):
-// Added three things that did not exist before:
-//   1. Perfect-score perk grant: if correct_count === total_questions,
-//      grant +1 Owl of Wisdom AND +1 Sly Fox 5000.
-//   2. Update the matching student_challenge_schedule row's status to
-//      'passed' or 'failed' (depending on whether the challenge's own
-//      pass/fail rule was met) and set completed_at / best_score.
-//   3. Schedule the NEXT challenge for this student: a new 'locked' row
-//      with available_from = (this challenge's expires_at) + 7 days,
-//      matching the next week number for the same track.
-// Everything else (auth, scoring, streak multiplier, XP, attempt insert)
-// is unchanged from the existing implementation.
+// UPDATED WEEKLY CHALLENGE TIMING FLOW:
+// - Challenge availability is NOT checked inside this Edge Function anymore.
+// - The student-specific timing window is validated by SQL RPC:
+//     public.validate_student_challenge_submission(p_user_id, p_challenge_id)
+// - SQL uses student_challenge_schedule.available_from / expires_at / status.
+// - This function still uses localTime only for streak multiplier logic.
+//
+// EXPECTED DB TIMING RULE:
+// - assigned_at      = diagnostic initialization / schedule creation time
+// - available_from   = assigned_at + 14 days
+// - expires_at       = available_from + 7 days
+//
+// OTHER BEHAVIOR KEPT:
+// - Auth check
+// - Answer shape normalization
+// - Scoring
+// - Streak multiplier
+// - XP award
+// - Perfect-score perk grant
+// - Update student_challenge_schedule
+// - schedule_next_challenge RPC after completion
 // ============================================================
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
@@ -24,6 +33,39 @@ const SUPABASE_ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
 
 const VALID_DIFFICULTIES = ["easy", "mid", "hard"] as const;
 type Difficulty = typeof VALID_DIFFICULTIES[number];
+
+// ── Answer shape normalization ─────────────────────────────
+// Accepts either:
+//   Flat shape:    { "question-uuid": "B", ... }
+//   Flutter shape: { answers: [{ question_id, selected_label: "B) Some text" }, ...] }
+// Always returns a flat { question-uuid: "B" } map for scoring.
+function normalizeAnswers(raw: unknown): Record<string, string> {
+  if (!raw || typeof raw !== "object") return {};
+
+  const asObj = raw as Record<string, unknown>;
+
+  // Flutter shape: top-level key is "answers" and its value is an array
+  if (Array.isArray(asObj.answers)) {
+    const flat: Record<string, string> = {};
+    for (const entry of asObj.answers) {
+      if (!entry || typeof entry !== "object") continue;
+      const { question_id, selected_label } = entry as Record<string, unknown>;
+      if (typeof question_id !== "string" || typeof selected_label !== "string") continue;
+
+      // selected_label is "B) Surveying only morning customers" → extract "B"
+      const letter = selected_label.split(")")[0].trim();
+      if (letter) flat[question_id] = letter;
+    }
+    return flat;
+  }
+
+  // Flat shape: already { question_id: "B" }
+  const flat: Record<string, string> = {};
+  for (const [k, v] of Object.entries(asObj)) {
+    if (typeof v === "string") flat[k] = v;
+  }
+  return flat;
+}
 
 Deno.serve(async (req: Request) => {
   if (req.method === "OPTIONS") {
@@ -41,23 +83,27 @@ Deno.serve(async (req: Request) => {
 
   let body: {
     challenge_id?: string;
-    answers?: Record<string, string>;
+    answers?: unknown;
     difficulty?: string;
     timezone_offset?: number;
   };
+
   try {
     body = await req.json();
   } catch {
     return respond({ error: "Invalid JSON body" }, 400);
   }
 
-  const { challenge_id, answers, difficulty, timezone_offset = 0 } = body;
+  const { challenge_id, answers: rawAnswers, difficulty, timezone_offset = 0 } = body;
 
   if (!challenge_id) return respond({ error: "challenge_id is required" }, 400);
-  if (!answers) return respond({ error: "answers must be an object" }, 400);
+  if (!rawAnswers) return respond({ error: "answers must be an object" }, 400);
   if (!difficulty || !VALID_DIFFICULTIES.includes(difficulty as Difficulty)) {
     return respond({ error: "Invalid difficulty tier" }, 400);
   }
+
+  // Normalize to flat map before anything else touches answers.
+  const answers = normalizeAnswers(rawAnswers);
 
   const authHeader = req.headers.get("Authorization");
   if (!authHeader) return respond({ error: "Missing Authorization" }, 401);
@@ -65,10 +111,11 @@ Deno.serve(async (req: Request) => {
   const clientForAuth = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     global: { headers: { Authorization: authHeader } },
   });
+
   const { data: { user }, error: authError } = await clientForAuth.auth.getUser();
   if (authError || !user) return respond({ error: "Unauthorized" }, 401);
-  const studentId = user.id;
 
+  const studentId = user.id;
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
   const { data: existingAttempt } = await supabase
@@ -80,10 +127,11 @@ Deno.serve(async (req: Request) => {
 
   if (existingAttempt) return respond({ error: "Already submitted" }, 409);
 
-  // ── Calculate Student's Local Date ─────────────────────────
+  // ── Calculate Student's Local Time ─────────────────────────
+  // Still used for streak multiplier calculation only.
+  // Challenge availability is validated by SQL using student_challenge_schedule.
   const serverNow = new Date();
   const localTime = new Date(serverNow.getTime() + timezone_offset * 60 * 60 * 1000);
-  const localDateStr = localTime.toISOString().split("T")[0]; // YYYY-MM-DD
 
   const { data: challenge, error: challengeError } = await supabase
     .from("weekly_challenges")
@@ -95,15 +143,61 @@ Deno.serve(async (req: Request) => {
     return respond({ error: "Challenge unavailable" }, 404);
   }
 
-  // Use localDateStr to check if they are within the window
-  if (localDateStr < challenge.available_from || localDateStr > challenge.available_until) {
-    return respond({ error: "Outside of availability window" }, 403);
+  // ── Validate student-specific challenge timing in SQL ───────
+  // The Edge Function must not decide availability.
+  // SQL checks student_challenge_schedule.available_from/expires_at/status/attempts.
+  const { data: validationResult, error: validationError } = await supabase.rpc(
+    "validate_student_challenge_submission",
+    {
+      p_user_id: studentId,
+      p_challenge_id: challenge_id,
+    },
+  );
+
+  if (validationError) {
+    console.error("validate_student_challenge_submission RPC error:", validationError);
+    return respond(
+      {
+        error: "Challenge validation failed",
+        details: validationError.message,
+      },
+      500,
+    );
   }
 
-  const { data: questions } = await supabase
+  const validation = validationResult as {
+    ok?: boolean;
+    reason?: string;
+    message?: string;
+    available_from?: string;
+    expires_at?: string;
+    server_now?: string;
+    schedule_id?: string;
+    status?: string;
+  };
+
+  if (!validation?.ok) {
+    return respond(
+      {
+        error: validation?.message ?? "Challenge is not available",
+        reason: validation?.reason ?? "not_available",
+        available_from: validation?.available_from,
+        expires_at: validation?.expires_at,
+        server_now: validation?.server_now,
+      },
+      403,
+    );
+  }
+
+  const { data: questions, error: questionsError } = await supabase
     .from("challenge_questions")
     .select("id, correct_answer")
     .eq("challenge_id", challenge_id);
+
+  if (questionsError) {
+    console.error("challenge_questions fetch error:", questionsError);
+    return respond({ error: "Failed to load challenge questions" }, 500);
+  }
 
   let correctCount = 0;
   const totalQuestions = questions?.length || 0;
@@ -141,6 +235,7 @@ Deno.serve(async (req: Request) => {
   const earnedXp = Math.round(baseXp * (score / 100));
   const finalXpAwarded = Math.round(earnedXp * streakMultiplier);
 
+  // Store the normalized flat map — consistent shape in DB regardless of client.
   const { error: insertError } = await supabase.from("student_challenge_attempts").insert({
     user_id: studentId,
     challenge_id: challenge_id,
@@ -154,14 +249,25 @@ Deno.serve(async (req: Request) => {
     return respond({ error: "Already submitted" }, 409);
   }
 
+  if (insertError) {
+    console.error("student_challenge_attempts insert error:", insertError);
+    return respond({ error: "Failed to save challenge attempt", details: insertError.message }, 500);
+  }
+
   if (finalXpAwarded > 0) {
-    await supabase.rpc("increment_xp", { user_id_input: studentId, xp_amount: finalXpAwarded });
+    const { error: xpError } = await supabase.rpc("increment_xp", {
+      user_id_input: studentId,
+      xp_amount: finalXpAwarded,
+    });
+
+    if (xpError) {
+      console.error("increment_xp RPC error:", xpError);
+    }
   }
 
   // ════════════════════════════════════════════════════════════
-  // NEW (1/3): Perfect-score perk grant.
-  // Fires only on a true 3/3 (or N/N) perfect score, per the
-  // handover NOTE in Section 4.4 — partial scores grant no perks.
+  // Perfect-score perk grant.
+  // Fires only on a true N/N perfect score.
   // ════════════════════════════════════════════════════════════
   let perksGranted = false;
   if (isPerfectScore) {
@@ -195,40 +301,37 @@ Deno.serve(async (req: Request) => {
   }
 
   // ════════════════════════════════════════════════════════════
-  // NEW (2/3): Update this student's schedule row for THIS challenge.
-  // Marks it passed/failed and records when it was completed.
-  // "Passed" here means a perfect score, since weekly challenges are
-  // single-attempt and the handover doesn't define a separate passing
-  // threshold distinct from "perfect" for the schedule's pass/fail
-  // status — see the handout notes for why this assumption was made.
+  // Update this student's schedule row for THIS challenge.
+  // Marks it passed/failed and records completion + attempt count.
+  // Passed means perfect score for this current challenge rule.
   // ════════════════════════════════════════════════════════════
   const { data: scheduleRow } = await supabase
     .from("student_challenge_schedule")
-    .select("id, expires_at")
+    .select("id, expires_at, current_attempts")
     .eq("user_id", studentId)
     .eq("challenge_id", challenge_id)
     .maybeSingle();
 
   if (scheduleRow) {
-    await supabase
+    const { error: scheduleUpdateError } = await supabase
       .from("student_challenge_schedule")
       .update({
         status: isPerfectScore ? "passed" : "failed",
         completed_at: new Date().toISOString(),
+        current_attempts: (scheduleRow.current_attempts ?? 0) + 1,
         best_score: score,
         passed: isPerfectScore,
       })
       .eq("id", scheduleRow.id);
+
+    if (scheduleUpdateError) {
+      console.error("student_challenge_schedule update error:", scheduleUpdateError);
+    }
   }
 
   // ════════════════════════════════════════════════════════════
-  // NEW (3/3): Schedule the NEXT challenge.
-  // Delegates to the shared schedule_next_challenge() Postgres function
-  // (2026_06_20_gamification_v2_addendum2.sql) so the "find next week,
-  // same track" logic lives in exactly ONE place — reused by both this
-  // Edge Function (submission path) and the daily Railway cron
-  // (expire_and_reschedule_stale_challenges, for students who never
-  // submit at all before their window closes).
+  // Schedule the NEXT challenge.
+  // Delegates to schedule_next_challenge() so next-challenge timing stays in SQL.
   // ════════════════════════════════════════════════════════════
   let nextChallengeScheduled = false;
 
@@ -260,6 +363,13 @@ Deno.serve(async (req: Request) => {
       perfect_score: isPerfectScore,
       perks_granted: perksGranted,
       next_challenge_scheduled: nextChallengeScheduled,
+      challenge_validation: {
+        schedule_id: validation.schedule_id,
+        status: validation.status,
+        available_from: validation.available_from,
+        expires_at: validation.expires_at,
+        server_now: validation.server_now,
+      },
     },
     200,
   );
