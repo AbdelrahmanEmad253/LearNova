@@ -5,6 +5,8 @@ import 'package:learnova/core/services/supabase/rank_service.dart';
 import 'package:learnova/features/rank/domain/entities/rank_data.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 
+import '../../../auth/presentation/providers/auth_providers.dart';
+
 final rankServiceProvider = Provider<RankService>((ref) {
   return RankService(ref.watch(supabaseClientProvider));
 });
@@ -25,35 +27,39 @@ class RankController extends AsyncNotifier<RankData> {
   }
 
   Future<RankData> _fetchData() async {
-    final service = ref.read(rankServiceProvider);
-    final leaderboardRaw = await service.fetchLeaderboard();
     final client = ref.read(supabaseClientProvider);
     final currentUserId = client.auth.currentUser?.id;
 
+    // Watch student profile so rank updates when XP changes
+    final studentProfile = ref.watch(studentProfileProvider).value;
+    final track = studentProfile?.assignedTrack ?? 'Foundation';
+
+    final service = ref.read(rankServiceProvider);
+    final leaderboardRaw = await service.fetchLeaderboard(track);
+
     int currentUserPos = 0;
-    int currentUserXp = 0;
+    int currentUserXp = studentProfile?.totalXp ?? 0;
 
     final List<RankEntry> leaderboard = [];
     
     for (int i = 0; i < leaderboardRaw.length; i++) {
       final row = leaderboardRaw[i];
       final isMe = row['user_id'] == currentUserId;
-      final xp = (row['xp_total'] as int?) ?? 0;
-      final userDict = row['users'] as Map<String, dynamic>?;
-      
+      final xp = (row['xp_at_snapshot'] as int?) ?? 0;
+      final rank = (row['rank_at_snapshot'] as int?) ?? (i + 1);
       if (isMe) {
-        currentUserPos = i + 1;
+        currentUserPos = rank;
         currentUserXp = xp;
       }
 
       leaderboard.add(
         RankEntry(
           id: row['user_id'].toString(),
-          name: userDict?['full_name']?.toString() ?? 'User',
+          name: row['full_name']?.toString() ?? 'User',
           userTag: '#${row['user_id'].toString().substring(0, 6)}',
-          position: i + 1,
-          pointsChange: 0, // Defaulting to 0 since we have no history table
-          avatarUrl: userDict?['avatar_url']?.toString(),
+          position: rank,
+          xp: xp,
+          avatarUrl: row['avatar_url']?.toString(),
           isCurrentUser: isMe,
         )
       );
@@ -65,9 +71,29 @@ class RankController extends AsyncNotifier<RankData> {
     }
 
     final currentRankName = _getRankName(currentUserXp);
-    final nextRankName = _getRankName(currentUserXp + 1000); // placeholder next
-    final remainingXP = 1000 - (currentUserXp % 1000); // placeholder math
-    final xpProgress = (currentUserXp % 1000) / 1000.0;
+    
+    int nextRankThreshold = 5000;
+    if (currentUserXp < 100) nextRankThreshold = 100;
+    else if (currentUserXp < 500) nextRankThreshold = 500;
+    else if (currentUserXp < 1000) nextRankThreshold = 1000;
+    else if (currentUserXp < 2000) nextRankThreshold = 2000;
+    else if (currentUserXp < 5000) nextRankThreshold = 5000;
+    else nextRankThreshold = currentUserXp; // Max rank reached
+    
+    int currentRankBase = 0;
+    if (currentUserXp >= 100 && currentUserXp < 500) currentRankBase = 100;
+    else if (currentUserXp >= 500 && currentUserXp < 1000) currentRankBase = 500;
+    else if (currentUserXp >= 1000 && currentUserXp < 2000) currentRankBase = 1000;
+    else if (currentUserXp >= 2000 && currentUserXp < 5000) currentRankBase = 2000;
+    else if (currentUserXp >= 5000) currentRankBase = 5000;
+
+    final nextRankName = currentUserXp >= 5000 ? 'Max Rank' : _getRankName(nextRankThreshold);
+    final remainingXP = currentUserXp >= 5000 ? 0 : nextRankThreshold - currentUserXp;
+    
+    double xpProgress = 1.0;
+    if (currentUserXp < 5000) {
+      xpProgress = (currentUserXp - currentRankBase) / (nextRankThreshold - currentRankBase);
+    }
 
     return RankData(
       screenTitle: 'Leaderboard',

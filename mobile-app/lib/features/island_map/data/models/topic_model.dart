@@ -18,7 +18,9 @@ class TopicModel extends Topic {
         ? resourcesJson
             .map((e) => TopicResourceModel.fromJson(e as Map<String, dynamic>))
             .toList()
-        : const <TopicResourceModel>[];
+        : <TopicResourceModel>[];
+
+    parsedResources.sort((a, b) => a.orderIndex.compareTo(b.orderIndex));
 
     return TopicModel(
       id: json['id'] as String,

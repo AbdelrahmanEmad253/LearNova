@@ -11,9 +11,18 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:learnova/features/home/presentation/providers/home_providers.dart';
+import 'package:learnova/features/auth/presentation/providers/avatar_providers.dart';
+import 'package:learnova/features/auth/presentation/providers/auth_providers.dart';
+import 'package:learnova/features/profile/presentation/providers/profile_providers.dart';
+import 'package:learnova/features/rank/presentation/providers/rank_providers.dart';
 
 class MainNavigationScreen extends ConsumerStatefulWidget {
-  const MainNavigationScreen({super.key});
+  final int initialIndex;
+
+  const MainNavigationScreen({
+    super.key,
+    this.initialIndex = 0,
+  });
 
   @override
   ConsumerState<MainNavigationScreen> createState() => _MainNavigationScreenState();
@@ -21,14 +30,19 @@ class MainNavigationScreen extends ConsumerStatefulWidget {
 
 class _MainNavigationScreenState extends ConsumerState<MainNavigationScreen> {
   static const double _bottomNavReservedSpace = 120;
-  int _selectedIndex = 0;
+  late int _selectedIndex;
   late final PresenceService _presenceService;
 
   @override
   void initState() {
     super.initState();
+    _selectedIndex = widget.initialIndex;
     _presenceService = PresenceService(Supabase.instance.client);
     _presenceService.start();
+    
+    Future.microtask(() {
+      ref.read(activityTrackingServiceProvider).markAppOpenToday();
+    });
   }
 
   @override
@@ -48,6 +62,14 @@ class _MainNavigationScreenState extends ConsumerState<MainNavigationScreen> {
   void _onTabSelected(int index) {
     if (index == _selectedIndex) {
       return;
+    }
+    
+    if (index == 4) {
+      ref.invalidate(studentProfileProvider);
+      ref.invalidate(profileDataProvider);
+    } else if (index == 3) {
+      ref.invalidate(studentProfileProvider);
+      ref.invalidate(rankDataProvider);
     }
 
     setState(() {

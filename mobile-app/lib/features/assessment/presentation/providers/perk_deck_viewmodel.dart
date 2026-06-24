@@ -97,8 +97,10 @@ class PerkDeckViewModel extends StateNotifier<PerkDeckState> {
 
     final updatedEffects = currentEffects.copyWith(
       hint: result.hint ?? currentEffects.hint,
-      eliminatedOptionIndex:
-          result.eliminatedOptionIndex ?? currentEffects.eliminatedOptionIndex,
+      eliminatedOptionKey:
+          result.eliminatedOptionKey ?? currentEffects.eliminatedOptionKey,
+      eliminatedOptionValue:
+          result.eliminatedOptionValue ?? currentEffects.eliminatedOptionValue,
       usedPerkIds: {...currentEffects.usedPerkIds, perk.id},
     );
 

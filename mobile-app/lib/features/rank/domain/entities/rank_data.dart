@@ -23,7 +23,7 @@ class RankEntry {
   final String name;
   final String userTag;
   final int position;
-  final int pointsChange;
+  final int xp;
   final String? avatarUrl;
   final bool isCurrentUser;
 
@@ -32,7 +32,7 @@ class RankEntry {
     required this.name,
     required this.userTag,
     required this.position,
-    required this.pointsChange,
+    required this.xp,
     this.avatarUrl,
     this.isCurrentUser = false,
   });

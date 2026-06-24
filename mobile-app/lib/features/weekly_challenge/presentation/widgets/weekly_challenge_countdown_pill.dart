@@ -5,11 +5,13 @@ import 'package:learnova/core/theme/app_colors.dart';
 class WeeklyChallengeCountdownPill extends StatelessWidget {
   final String prefix;
   final String countdown;
+  final bool isLocked;
 
   const WeeklyChallengeCountdownPill({
     super.key,
     required this.prefix,
     required this.countdown,
+    this.isLocked = false,
   });
 
   @override
@@ -20,9 +22,9 @@ class WeeklyChallengeCountdownPill extends StatelessWidget {
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 26, vertical: 18),
       decoration: BoxDecoration(
-        color: colors.primary,
+        color: isLocked ? colors.borderWeak : colors.primary,
         borderRadius: BorderRadius.circular(999),
-        boxShadow: [
+        boxShadow: isLocked ? [] : [
           BoxShadow(
             color: colors.primary.withValues(alpha: 0.3),
             blurRadius: 12,
@@ -37,21 +39,23 @@ class WeeklyChallengeCountdownPill extends StatelessWidget {
           children: [
             Text(
               prefix,
-              style: const TextStyle(
-                color: ColorManager.uiPanelDark,
+              style: TextStyle(
+                color: isLocked ? colors.textPrimary : ColorManager.uiPanelDark,
                 fontSize: 22,
                 fontWeight: FontWeight.w900,
               ),
             ),
-            const SizedBox(width: 10),
-            Text(
-              countdown,
-              style: const TextStyle(
-                color: ColorManager.uiPanelDark,
-                fontSize: 21,
-                fontWeight: FontWeight.w500,
+            if (countdown.isNotEmpty) ...[
+              const SizedBox(width: 10),
+              Text(
+                countdown,
+                style: TextStyle(
+                  color: isLocked ? colors.textPrimary : ColorManager.uiPanelDark,
+                  fontSize: 21,
+                  fontWeight: FontWeight.w500,
+                ),
               ),
-            ),
+            ],
           ],
         ),
       ),

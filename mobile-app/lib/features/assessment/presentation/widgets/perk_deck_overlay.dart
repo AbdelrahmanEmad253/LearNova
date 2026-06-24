@@ -37,7 +37,7 @@ class _PerkDeckOverlayState extends ConsumerState<PerkDeckOverlay>
   bool _isDeckOpen = false;
 
   late final AnimationController _deckController;
-  late final Animation<Offset> _deckSlide;
+  late final Animation<double> _deckSize;
 
   @override
   void initState() {
@@ -48,14 +48,11 @@ class _PerkDeckOverlayState extends ConsumerState<PerkDeckOverlay>
       duration: const Duration(milliseconds: 400),
     );
 
-    _deckSlide = Tween<Offset>(
-      begin: const Offset(0, 1),
-      end: Offset.zero,
-    ).animate(CurvedAnimation(
+    _deckSize = CurvedAnimation(
       parent: _deckController,
       curve: Curves.easeOutCubic,
       reverseCurve: Curves.easeInCubic,
-    ));
+    );
 
     // Initialize perk inventory on first mount.
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -134,8 +131,9 @@ class _PerkDeckOverlayState extends ConsumerState<PerkDeckOverlay>
           ),
 
           // ── Sliding deck ──
-          SlideTransition(
-            position: _deckSlide,
+          SizeTransition(
+            sizeFactor: _deckSize,
+            axisAlignment: -1.0,
             child: Container(
               padding: EdgeInsets.fromLTRB(
                 12,

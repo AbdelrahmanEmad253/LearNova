@@ -18,8 +18,6 @@ class ChallengeRepository {
     final userId = _supabase.auth.currentUser?.id;
     if (userId == null) return null;
 
-    // Uncomment this for actual Supabase fetch:
-    /*
     final response = await _supabase
         .from('student_challenge_schedule')
         .select('*, weekly_challenges(*)')
@@ -30,34 +28,5 @@ class ChallengeRepository {
 
     if (response == null) return null;
     return ChallengeScheduleModel.fromJson(response);
-    */
-
-    // --- MOCK DATA FOR UI TESTING ---
-    await Future.delayed(const Duration(milliseconds: 800));
-
-    // To test different states, change the `status` and dates below.
-    // States: 'locked', 'available', 'started', 'passed', 'failed', 'expired'
-    return ChallengeScheduleModel(
-      id: 'mock-sched-123',
-      userId: userId,
-      challengeId: 'mock-chal-123',
-      status: 'available', // <-- Change this to test UI
-      assignedAt: DateTime.now().subtract(const Duration(days: 1)),
-      availableFrom: DateTime.now().subtract(const Duration(minutes: 5)),
-      expiresAt: DateTime.now().add(const Duration(days: 2)),
-      currentAttempts: 0,
-      passed: false,
-      bestScore: null,
-      challengeDetails: const WeeklyChallengeModel(
-        id: 'mock-chal-123',
-        moduleId: 'mod-123',
-        title: 'Mastering Pointers in C++',
-        description: 'A 15-question challenge covering advanced memory management and pointer arithmetic.',
-        isActive: true,
-        xpRewardEasy: 20,
-        xpRewardMid: 50,
-        xpRewardHard: 100,
-      ),
-    );
   }
 }

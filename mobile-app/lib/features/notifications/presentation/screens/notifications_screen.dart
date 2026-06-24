@@ -66,12 +66,27 @@ class NotificationsScreen extends ConsumerWidget {
                         ),
                         const SizedBox(height: 26),
                         ...List.generate(data.items.length, (index) {
+                          final item = data.items[index];
                           return Padding(
                             padding: EdgeInsets.only(
-                                bottom:
-                                    index == data.items.length - 1 ? 0 : 16),
-                            child:
-                                NotificationListItem(item: data.items[index]),
+                                bottom: index == data.items.length - 1 ? 0 : 16),
+                            child: Dismissible(
+                              key: ValueKey(item.id),
+                              direction: DismissDirection.endToStart,
+                              onDismissed: (_) {
+                                ref.read(notificationsDataProvider.notifier).removeNotification(item.id);
+                              },
+                              background: Container(
+                                alignment: Alignment.centerRight,
+                                padding: const EdgeInsets.only(right: 20),
+                                decoration: BoxDecoration(
+                                  color: Colors.redAccent.withValues(alpha: 0.8),
+                                  borderRadius: BorderRadius.circular(20),
+                                ),
+                                child: const Icon(Icons.delete_outline, color: Colors.white, size: 28),
+                              ),
+                              child: NotificationListItem(item: item),
+                            ),
                           );
                         }),
                       ],

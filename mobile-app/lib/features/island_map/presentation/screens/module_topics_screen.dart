@@ -13,6 +13,9 @@ import 'package:learnova/features/content/domain/entities/content_item_payload.d
 import 'package:learnova/features/content/presentation/screens/content_video_player.dart';
 import 'package:learnova/features/content/presentation/screens/content_audio_player.dart';
 import 'package:learnova/features/content/presentation/screens/content_document_reader.dart';
+import 'package:learnova/features/curriculum/domain/entities/topic_progress_entity.dart';
+import 'package:learnova/features/curriculum/presentation/providers/topic_progress_provider.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 class ModuleTopicsScreen extends ConsumerWidget {
   final String moduleId;
@@ -131,38 +134,56 @@ class ModuleTopicsScreen extends ConsumerWidget {
   }
 
   Widget _buildTopicCard(BuildContext context, AppColors colors, Topic topic) {
-    return Card(
-      color: colors.cardBackground,
-      margin: const EdgeInsets.only(bottom: 16.0),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      child: Padding(
-        padding: const EdgeInsets.all(16.0),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              topic.title,
-              style: TextStyle(
-                color: colors.textPrimary,
-                fontSize: 18,
-                fontWeight: FontWeight.w600,
-              ),
+    final currentUserId = Supabase.instance.client.auth.currentUser?.id ?? '';
+    
+    return Consumer(
+      builder: (context, ref, child) {
+        final progressAsync = ref.watch(topicProgressProvider((userId: currentUserId, topicId: topic.id) as TopicProgressArgs));
+        final isCompleted = progressAsync.value?.status == TopicStatus.completed;
+        
+        return Card(
+          color: colors.cardBackground,
+          margin: const EdgeInsets.only(bottom: 16.0),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Expanded(
+                      child: Text(
+                        topic.title,
+                        style: TextStyle(
+                          color: colors.textPrimary,
+                          fontSize: 18,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                    if (isCompleted)
+                      const Icon(Icons.check_circle, color: Colors.green),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                if (topic.resources.isEmpty)
+                  Text(
+                    'No resources found matching your learning style.',
+                    style: TextStyle(color: colors.textSecondary, fontStyle: FontStyle.italic),
+                  )
+                else
+                  ...topic.resources.map((res) => _buildResourceTile(context, colors, topic, res)),
+              ],
             ),
-            const SizedBox(height: 12),
-            if (topic.resources.isEmpty)
-              Text(
-                'No resources found matching your learning style.',
-                style: TextStyle(color: colors.textSecondary, fontStyle: FontStyle.italic),
-              )
-            else
-              ...topic.resources.map((res) => _buildResourceTile(context, colors, res)),
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
 
-  Widget _buildResourceTile(BuildContext context, AppColors colors, TopicResource resource) {
+  Widget _buildResourceTile(BuildContext context, AppColors colors, Topic topic, TopicResource resource) {
     IconData icon;
     String route;
     
@@ -203,6 +224,7 @@ class ModuleTopicsScreen extends ConsumerWidget {
           title: '${resource.formatType} Lesson',
           contentType: resource.formatType,
           meta: '10 mins', // Default meta for now
+          topicId: topic.id,
           mediaUrl: resource.resourceUrl,
         );
 

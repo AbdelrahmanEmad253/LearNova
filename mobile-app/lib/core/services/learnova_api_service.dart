@@ -1,11 +1,15 @@
 import 'package:supabase_flutter/supabase_flutter.dart';
+import 'package:uuid/uuid.dart';
 
 class LearNovaApiException implements Exception {
   final String message;
   final Object? cause;
   LearNovaApiException(this.message, {this.cause});
   @override
-  String toString() => 'LearNovaApiException: $message';
+  String toString() {
+    if (cause != null) return 'LearNovaApiException: $message\nCause: $cause';
+    return 'LearNovaApiException: $message';
+  }
 }
 
 class MitchyChatResult {
@@ -15,6 +19,7 @@ class MitchyChatResult {
   final double cognitiveLoad;
   final String suggestedAction;
   final String recommendedFormat;
+  final String? sessionId;
   final Map<String, dynamic> metadata;
 
   MitchyChatResult({
@@ -24,6 +29,7 @@ class MitchyChatResult {
     required this.cognitiveLoad,
     required this.suggestedAction,
     required this.recommendedFormat,
+    this.sessionId,
     required this.metadata,
   });
 
@@ -35,6 +41,8 @@ class MitchyChatResult {
       cognitiveLoad: (json['cognitive_load'] as num?)?.toDouble() ?? 0.0,
       suggestedAction: json['suggested_action']?.toString() ?? 'none',
       recommendedFormat: json['recommended_format']?.toString() ?? 'textual',
+      sessionId: (json['message'] as Map?)?['session_id']?.toString() ??
+          (json['metadata'] as Map?)?['session_id']?.toString(),
       metadata: Map<String, dynamic>.from(json['metadata'] ?? const {}),
     );
   }
@@ -58,9 +66,15 @@ class LearNovaApiService {
   }
 
   void _ensureOk(Map<String, dynamic> data, String fallbackMessage) {
-    if (data['ok'] != true) {
+    if (data.containsKey('error') ||
+        data.containsKey('detail') ||
+        data['ok'] == false ||
+        data['success'] == false) {
       throw LearNovaApiException(
-        data['error']?.toString() ?? data['detail']?.toString() ?? fallbackMessage,
+        data['error']?.toString() ??
+            data['detail']?.toString() ??
+            data['message']?.toString() ??
+            fallbackMessage,
       );
     }
   }
@@ -70,6 +84,7 @@ class LearNovaApiService {
     required String message,
     String? topicId,
     String? moduleId,
+    String? sessionId,
     String screenContext = 'unknown',
   }) async {
     _ensureSignedIn();
@@ -84,6 +99,7 @@ class LearNovaApiService {
           'message': cleanMessage,
           'topic_id': topicId,
           'module_id': moduleId,
+          'session_id': sessionId,
           'screen_context': screenContext,
         },
       );
@@ -102,7 +118,8 @@ class LearNovaApiService {
       return MitchyChatResult.fromJson(data);
     } catch (error) {
       if (error is LearNovaApiException) rethrow;
-      throw LearNovaApiException('Could not send message to Mitchy.', cause: error);
+      throw LearNovaApiException('Could not send message to Mitchy.',
+          cause: error);
     }
   }
 
@@ -127,6 +144,7 @@ class LearNovaApiService {
   Future<Map<String, dynamic>> submitModuleAttempt({
     required String assessmentId,
     required Map<String, dynamic> answers,
+    String difficulty = 'easy',
   }) async {
     _ensureSignedIn();
     try {
@@ -134,7 +152,9 @@ class LearNovaApiService {
         'submit-module-attempt',
         body: {
           'assessment_id': assessmentId,
+          'difficulty': difficulty,
           'answers': answers,
+          'client_submission_id': const Uuid().v4(),
         },
       );
       final data = _asMap(response.data);
@@ -142,7 +162,47 @@ class LearNovaApiService {
       return data;
     } catch (error) {
       if (error is LearNovaApiException) rethrow;
-      throw LearNovaApiException('Could not submit module attempt.', cause: error);
+      throw LearNovaApiException('Could not submit module attempt.',
+          cause: error);
+    }
+  }
+
+  Future<Map<String, dynamic>> submitLevelAttempt({
+    required String examId,
+    required String difficulty,
+    required Map<String, dynamic> answers,
+  }) async {
+    _ensureSignedIn();
+    try {
+      final attemptId = const Uuid().v4();
+      final userId = _supabase.auth.currentUser!.id;
+      final clientSubmissionId = const Uuid().v4();
+
+      // Insert the attempt first so the edge function can find it by attempt_id.
+      await _supabase.from('student_level_attempts').insert({
+        'id': attemptId,
+        'user_id': userId,
+        'assessment_id': examId,
+        'answers': answers,
+        'difficulty': difficulty,
+        'client_submission_id': clientSubmissionId,
+      });
+
+      // Then hand grading off to the edge function.
+      final response = await _supabase.functions.invoke(
+        'submit-level-attempt',
+        body: {
+          'attempt_id': attemptId,
+        },
+      );
+
+      final data = _asMap(response.data);
+      _ensureOk(data, 'Level attempt failed');
+      return data;
+    } catch (error) {
+      if (error is LearNovaApiException) rethrow;
+      throw LearNovaApiException('Could not submit level attempt.',
+          cause: error);
     }
   }
 
@@ -185,6 +245,7 @@ class LearNovaApiService {
         body: {
           'challenge_id': challengeId,
           'answers': answers,
+          'client_submission_id': const Uuid().v4(),
         },
       );
       final data = _asMap(response.data);
@@ -192,7 +253,8 @@ class LearNovaApiService {
       return data;
     } catch (error) {
       if (error is LearNovaApiException) rethrow;
-      throw LearNovaApiException('Could not submit challenge attempt.', cause: error);
+      throw LearNovaApiException('Could not submit challenge attempt.',
+          cause: error);
     }
   }
 }

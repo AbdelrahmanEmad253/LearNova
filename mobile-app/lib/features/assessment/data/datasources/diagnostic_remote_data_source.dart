@@ -96,9 +96,16 @@ class DiagnosticRemoteDataSource {
         .from('diagnostic_questions')
         .select('id, question_key, question_text, question_type, options, order_index')
         .eq('test_number', testNumber)
-        .order('order_index');
+        .order('order_index', ascending: true);
 
     final rows = List<Map<String, dynamic>>.from(raw);
+
+    // Ensure numerical sorting in Dart just in case DB sorts them as text
+    rows.sort((a, b) {
+      final aIdx = num.tryParse(a['order_index']?.toString() ?? '0') ?? 0;
+      final bIdx = num.tryParse(b['order_index']?.toString() ?? '0') ?? 0;
+      return aIdx.compareTo(bIdx);
+    });
 
     if (rows.isEmpty) {
       return <Map<String, dynamic>>[];
@@ -117,7 +124,7 @@ class DiagnosticRemoteDataSource {
           .from('diagnostic_question_images')
           .select('question_id, storage_path, bucket, order_index')
           .inFilter('question_id', questionIds)
-          .order('order_index');
+          .order('order_index', ascending: true);
 
       for (final imgRow in List<Map<String, dynamic>>.from(imageRows)) {
         final qId = imgRow['question_id']?.toString() ?? '';
@@ -362,13 +369,16 @@ class DiagnosticRemoteDataSource {
   /// Fetches exam questions by [moduleId].
   /// Uses `module_assessments` and `module_assessment_questions` tables.
   Future<List<Map<String, dynamic>>> fetchExamQuestions(
-    String moduleId,
-  ) async {
+    String moduleId, {
+    String difficulty = 'easy',
+  }) async {
     // 1. Find the assessment_id for this module
     final assessmentRes = await _client
         .from('module_assessments')
         .select('id')
         .eq('module_id', moduleId)
+        .eq('difficulty', difficulty)
+        .limit(1)
         .maybeSingle();
 
     if (assessmentRes == null) {
@@ -382,9 +392,16 @@ class DiagnosticRemoteDataSource {
         .from('module_assessment_questions')
         .select('id, question_text, options, correct_answer, order_index')
         .eq('assessment_id', assessmentId)
-        .order('order_index');
+        .order('order_index', ascending: true);
 
     final rows = List<Map<String, dynamic>>.from(raw);
+
+    // Ensure numerical sorting in Dart just in case DB sorts them as text
+    rows.sort((a, b) {
+      final aIdx = num.tryParse(a['order_index']?.toString() ?? '0') ?? 0;
+      final bIdx = num.tryParse(b['order_index']?.toString() ?? '0') ?? 0;
+      return aIdx.compareTo(bIdx);
+    });
 
     if (rows.isEmpty) {
       return <Map<String, dynamic>>[];
@@ -403,7 +420,7 @@ class DiagnosticRemoteDataSource {
           .from('module_assessment_question_images')
           .select('question_id, storage_path, order_index')
           .inFilter('question_id', questionIds)
-          .order('order_index');
+          .order('order_index', ascending: true);
 
       for (final imgRow in List<Map<String, dynamic>>.from(imageRows)) {
         final qId = imgRow['question_id']?.toString() ?? '';
@@ -428,6 +445,42 @@ class DiagnosticRemoteDataSource {
       }
       return mapped;
     }).whereType<Map<String, dynamic>>().toList(growable: false);
+  }
+
+  /// Fetches level exam questions (essay type) by [assessmentId].
+  /// Uses `level_assessment_questions` table.
+  Future<List<Map<String, dynamic>>> fetchLevelExamQuestions(
+    String assessmentId, {
+    String difficulty = 'mid',
+  }) async {
+    final raw = await _client
+        .from('level_assessment_questions')
+        .select('id, question_text, order_index')
+        .eq('assessment_id', assessmentId)
+        .eq('difficulty', difficulty)
+        .order('order_index', ascending: true);
+
+    final rows = List<Map<String, dynamic>>.from(raw);
+
+    // Ensure numerical sorting in Dart just in case DB sorts them as text
+    rows.sort((a, b) {
+      final aIdx = num.tryParse(a['order_index']?.toString() ?? '0') ?? 0;
+      final bIdx = num.tryParse(b['order_index']?.toString() ?? '0') ?? 0;
+      return aIdx.compareTo(bIdx);
+    });
+
+    if (rows.isEmpty) {
+      return <Map<String, dynamic>>[];
+    }
+
+    return rows.map((row) {
+      return {
+        'id': row['id']?.toString() ?? '',
+        'question': row['question_text']?.toString() ?? '',
+        'options': <String>[], // No options for essay
+        'correct_answer_index': 0, // Not applicable
+      };
+    }).toList(growable: false);
   }
 
   Map<String, dynamic>? _mapExamQuestionRow(
@@ -521,59 +574,29 @@ class DiagnosticRemoteDataSource {
       'id': questionId,
       'question': questionText,
       'options': options,
+      'choiceValues': choiceValues,
       'correct_answer_index': correctAnswerIndex,
       if (mediaImageUrl != null) 'image_url': mediaImageUrl,
     };
   }
 
-  Future<bool> submitModuleExamResult({
-    required String moduleId,
-    required double score,
-    required bool passed,
-    required String difficulty,
-    required List<Map<String, dynamic>> answers,
-  }) async {
-    final user = _client.auth.currentUser;
-    if (user == null) {
-      throw const AuthException('User is not authenticated.');
-    }
-
-    // 1. Find the assessment_id for this module
+  Future<String?> getAssessmentIdForModule(String moduleId, {String difficulty = 'easy'}) async {
     final assessmentRes = await _client
         .from('module_assessments')
         .select('id')
         .eq('module_id', moduleId)
+        .eq('difficulty', difficulty)
+        .limit(1)
         .maybeSingle();
 
     if (assessmentRes == null) {
-      return false;
+      return null;
     }
     
-    final assessmentId = assessmentRes['id'];
-
-    final row = <String, dynamic>{
-      'user_id': user.id,
-      'assessment_id': assessmentId,
-      'answers': answers,
-      'score': score,
-      'passed': passed,
-      'difficulty': difficulty,
-      'submitted_at': DateTime.now().toIso8601String(),
-    };
-
-    try {
-      await _client.from('student_module_attempts').insert(row);
-      return true;
-    } on PostgrestException catch (e) {
-      final details = [
-        if (e.code != null && e.code!.isNotEmpty) 'code=${e.code}',
-        if (e.message.isNotEmpty) e.message,
-        if (e.details != null) e.details.toString(),
-        if (e.hint != null && e.hint!.isNotEmpty) 'hint=${e.hint}',
-      ].join(' | ');
-      throw Exception('submitModuleExamResult failed: $details');
-    }
+    return assessmentRes['id'] as String;
   }
+
+
 
   /// Returns a real-time stream of diagnostic results for the current user.
   Stream<List<Map<String, dynamic>>> diagnosticResultsStream() {

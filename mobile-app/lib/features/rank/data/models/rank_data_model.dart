@@ -37,7 +37,7 @@ class RankEntryModel {
   final String name;
   final String userTag;
   final int position;
-  final int pointsChange;
+  final int xp;
   final String? avatarUrl;
   final bool isCurrentUser;
 
@@ -46,7 +46,7 @@ class RankEntryModel {
     required this.name,
     required this.userTag,
     required this.position,
-    required this.pointsChange,
+    required this.xp,
     this.avatarUrl,
     this.isCurrentUser = false,
   });
@@ -57,7 +57,7 @@ class RankEntryModel {
       name: name,
       userTag: userTag,
       position: position,
-      pointsChange: pointsChange,
+      xp: xp,
       avatarUrl: avatarUrl,
       isCurrentUser: isCurrentUser,
     );

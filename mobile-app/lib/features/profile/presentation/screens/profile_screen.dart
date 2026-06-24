@@ -94,11 +94,11 @@ class ProfileScreen extends ConsumerWidget {
               children: [
                 SvgPicture.asset(
                   AppAssets.profilePic,
-                  width: 272,
+                  width: 230,
                 ),
                 Column(
                   children: [
-                    const SizedBox(height: 10),
+                    const SizedBox(height: 50),
                     HexAvatarPanel(
                       width: 118,
                       height: 108,
@@ -151,13 +151,22 @@ class ProfileScreen extends ConsumerWidget {
                       child: FractionallySizedBox(
                         alignment: Alignment.centerLeft,
                         widthFactor:
-                            profileData.journeyCompletion.clamp(0.0, 1.0),
+                            profileData.xpProgress.clamp(0.0, 1.0),
                         child: Container(
                           decoration: BoxDecoration(
                             color: colors.primary,
                             borderRadius: BorderRadius.circular(4),
                           ),
                         ),
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      '${profileData.totalXp} XP',
+                      style: TextStyle(
+                        color: colors.textSecondary,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
                       ),
                     ),
                   ],
@@ -332,18 +341,39 @@ class ProfileScreen extends ConsumerWidget {
           ),
         ),
         const SizedBox(height: 8),
-        Container(
+        SizedBox(
           width: 40,
-          height: 145 * ratio,
-          decoration: BoxDecoration(
-            color: barColor,
-            borderRadius: BorderRadius.circular(6),
-            boxShadow: [
-              if (isTotal)
-                BoxShadow(
-                  color: barColor.withValues(alpha: 0.35),
-                  blurRadius: 14,
+          height: 145,
+          child: Stack(
+            alignment: Alignment.bottomCenter,
+            children: [
+              // Background Track
+              Container(
+                width: 40,
+                height: 145,
+                decoration: BoxDecoration(
+                  color: barColor.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(6),
                 ),
+              ),
+              // Foreground Active Bar
+              AnimatedContainer(
+                duration: const Duration(milliseconds: 600),
+                curve: Curves.easeOutCubic,
+                width: 40,
+                height: 145 * ratio,
+                decoration: BoxDecoration(
+                  color: barColor,
+                  borderRadius: BorderRadius.circular(6),
+                  boxShadow: [
+                    if (isTotal && ratio > 0)
+                      BoxShadow(
+                        color: barColor.withValues(alpha: 0.35),
+                        blurRadius: 14,
+                      ),
+                  ],
+                ),
+              ),
             ],
           ),
         ),
@@ -432,7 +462,7 @@ class ProfileScreen extends ConsumerWidget {
                   ),
                 ),
                 TextSpan(
-                  text: '${profileData.activeStreak} Days',
+                  text: '${profileData.activeStreak} ${profileData.activeStreak == 1 ? 'Day' : 'Days'}',
                   style: TextStyle(
                     color: colors.textPrimary,
                     fontSize: 15,
@@ -530,7 +560,7 @@ class ProfileScreen extends ConsumerWidget {
                     (perk) => _buildPerkCard(
                       image: perk.imagePath,
                       name: perk.name,
-                      sub: perk.subtitle,
+                      count: perk.count,
                       colors: colors,
                     ),
                   )
@@ -545,7 +575,7 @@ class ProfileScreen extends ConsumerWidget {
   Widget _buildPerkCard(
       {String? image,
       required String name,
-      required String sub,
+      required int count,
       required AppColors colors}) {
     final isUnlocked = image != null;
 
@@ -562,7 +592,10 @@ class ProfileScreen extends ConsumerWidget {
             borderWidth: 2,
             imageInset: 2.5,
             child: isUnlocked
-                ? Image.asset(image, fit: BoxFit.cover)
+                ? Opacity(
+                    opacity: count == 0 ? 0.4 : 1.0,
+                    child: Image.asset(image, fit: BoxFit.cover),
+                  )
                 : Container(
                     color: colors.borderWeak,
                     alignment: Alignment.center,
@@ -585,7 +618,7 @@ class ProfileScreen extends ConsumerWidget {
           ),
           const SizedBox(height: 4),
           Text(
-            sub,
+            'x$count',
             style: TextStyle(
               color: colors.textSecondary,
               fontSize: 14,
@@ -623,6 +656,7 @@ class ProfileScreen extends ConsumerWidget {
                       child: _buildBadgeItem(
                           label: badge.label,
                           isLocked: badge.isLocked,
+                          imageUrl: badge.imageUrl,
                           colors: colors),
                     ),
                   )
@@ -681,6 +715,7 @@ class ProfileScreen extends ConsumerWidget {
   Widget _buildBadgeItem(
       {required String label,
       required bool isLocked,
+      String? imageUrl,
       required AppColors colors}) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -706,7 +741,11 @@ class ProfileScreen extends ConsumerWidget {
                     ),
                   ),
                 )
-              : SvgPicture.asset(AppAssets.profileBadge, fit: BoxFit.contain),
+              : (imageUrl != null
+                  ? (imageUrl.endsWith('.svg')
+                      ? SvgPicture.network(imageUrl, fit: BoxFit.contain)
+                      : Image.network(imageUrl, fit: BoxFit.contain))
+                  : SvgPicture.asset(AppAssets.profileBadge, fit: BoxFit.contain)),
         ),
         const SizedBox(height: 10),
         SizedBox(

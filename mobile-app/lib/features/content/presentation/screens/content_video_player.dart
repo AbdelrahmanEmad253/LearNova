@@ -19,11 +19,13 @@ import 'package:learnova/features/content/domain/entities/content_item_payload.d
 import 'package:learnova/features/content/presentation/providers/content_providers.dart';
 import 'package:learnova/features/content/presentation/screens/content_audio_player.dart';
 import 'package:learnova/features/content/presentation/screens/content_document_reader.dart';
+import 'package:learnova/features/curriculum/presentation/notifiers/topic_session_notifier.dart';
+import 'package:learnova/features/curriculum/presentation/providers/topic_progress_provider.dart';
 import 'package:learnova/features/home/presentation/providers/home_providers.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:video_player/video_player.dart';
 import 'package:webview_flutter/webview_flutter.dart';
-import 'package:youtube_player_flutter/youtube_player_flutter.dart'
-    as yt_flutter;
+import 'package:youtube_player_flutter/youtube_player_flutter.dart' as yt_flutter;
 
 /// Determines how the video is being rendered.
 enum _VideoMode {
@@ -76,6 +78,9 @@ class _VideoPlayerPlaceholderScreenState
   bool _videoLoading = false;
   String? _videoErrorMessage;
   _VideoMode? _mode;
+
+  AppLifecycleListener? _lifecycleListener;
+  ({String topicId, String userId, String formatType})? _sessionArgs;
 
   // --------------------------------------------------------------------------
   // Duration helpers
@@ -394,10 +399,27 @@ class _VideoPlayerPlaceholderScreenState
     _totalDuration = _parseMetaDuration(widget.item.meta);
     _progress = _progress.clamp(0.0, 1.0);
     _initializeMedia();
+
+    final userId = Supabase.instance.client.auth.currentUser?.id;
+    final topicId = widget.item.topicId;
+    if (userId != null && topicId != null) {
+      _sessionArgs = (userId: userId, topicId: topicId, formatType: widget.item.contentType);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        ref.read(topicSessionNotifierProvider.notifier).init(_sessionArgs!);
+        ref.read(topicSessionNotifierProvider.notifier).startSession();
+      });
+      _lifecycleListener = AppLifecycleListener(
+        onPause: () => ref.read(topicSessionNotifierProvider.notifier).pauseSession(),
+        onResume: () => ref.read(topicSessionNotifierProvider.notifier).resumeSession(),
+        onHide: () => ref.read(topicSessionNotifierProvider.notifier).flushTelemetry(),
+      );
+    }
   }
 
   @override
   void dispose() {
+    _lifecycleListener?.dispose();
+    
     _playbackTimer?.cancel();
     _videoPlayerController?.removeListener(_syncDirectVideoState);
     _videoPlayerController?.dispose();
@@ -624,7 +646,7 @@ class _VideoPlayerPlaceholderScreenState
     return items[nextIndex];
   }
 
-  void _onFinishPressed() {
+  Future<void> _onFinishPressed() async {
     if (widget.moduleId != null) {
       ref.read(moduleProgressProvider.notifier).markItemCompleted(
             moduleId: widget.moduleId!,
@@ -632,53 +654,15 @@ class _VideoPlayerPlaceholderScreenState
           );
     }
 
-    final ContentItemPayload? nextItem = _nextItemInModule();
-    if (nextItem == null) {
+    if (_sessionArgs != null) {
+      final notifier = ref.read(topicSessionNotifierProvider.notifier);
+      await notifier.consumeResource('Visual');
+      await notifier.completeTopic();
+    }
+
+    if (mounted) {
       AppRouter.pop(context);
-      return;
     }
-
-    final ContentDestination destination =
-        ref.read(resolveContentDestinationUseCaseProvider)(nextItem);
-
-    if (destination == ContentDestination.audio) {
-      AppRouter.pushReplacement(
-        context,
-        AudioStudyPlayerScreen(
-          item: nextItem,
-          moduleItems: widget.moduleItems,
-          moduleIndex: (widget.moduleIndex ?? 0) + 1,
-          moduleId: widget.moduleId,
-        ),
-        routeName: AppRoutePaths.contentAudioPlayer,
-      );
-      return;
-    }
-
-    if (destination == ContentDestination.video) {
-      AppRouter.pushReplacement(
-        context,
-        VideoPlayerPlaceholderScreen(
-          item: nextItem,
-          moduleItems: widget.moduleItems,
-          moduleIndex: (widget.moduleIndex ?? 0) + 1,
-          moduleId: widget.moduleId,
-        ),
-        routeName: AppRoutePaths.contentVideoPlayer,
-      );
-      return;
-    }
-
-    AppRouter.pushReplacement(
-      context,
-      DocumentReaderPlaceholderScreen(
-        item: nextItem,
-        moduleItems: widget.moduleItems,
-        moduleIndex: (widget.moduleIndex ?? 0) + 1,
-        moduleId: widget.moduleId,
-      ),
-      routeName: AppRoutePaths.contentDocumentReader,
-    );
   }
 
   // --------------------------------------------------------------------------
@@ -715,6 +699,7 @@ class _VideoPlayerPlaceholderScreenState
 
   @override
   Widget build(BuildContext context) {
+    ref.watch(topicSessionNotifierProvider);
     final Size size = MediaQuery.of(context).size;
     final double sx = size.width / 412;
     final double sy = size.height / 917;
@@ -743,7 +728,7 @@ class _VideoPlayerPlaceholderScreenState
     final colors = AppColors.of(context);
     final double sx = ss;
     final double sy = ss;
-    final ContentItemPayload? nextItem = _nextItemInModule();
+    final sessionState = ref.watch(topicSessionNotifierProvider);
 
     return PopScope(
       canPop: !_isFullscreen,
@@ -828,7 +813,7 @@ class _VideoPlayerPlaceholderScreenState
                             SizedBox(
                               width: double.infinity,
                               child: FilledButton.icon(
-                                onPressed: canFinish ? _onFinishPressed : null,
+                                onPressed: (canFinish && !sessionState.isLoading) ? _onFinishPressed : null,
                                 style: FilledButton.styleFrom(
                                   backgroundColor: colors.primary,
                                   foregroundColor: colors.buttonForeground,
@@ -840,20 +825,31 @@ class _VideoPlayerPlaceholderScreenState
                                     borderRadius: BorderRadius.circular(16),
                                   ),
                                 ),
-                                icon: Icon(
-                                  Icons.check_circle_outline,
-                                  color: colors.buttonForeground,
-                                ),
-                                label: Text(
-                                  nextItem == null
-                                      ? 'Mark as Completed'
-                                      : 'Finish and Next',
-                                  style: TextStyle(
-                                    fontSize: 18 * ss,
-                                    fontWeight: FontWeight.w700,
-                                    fontFamily: 'Poppins',
-                                  ),
-                                ),
+                                icon: sessionState.isLoading
+                                    ? null
+                                    : Icon(
+                                        Icons.check_circle_outline,
+                                        color: colors.buttonForeground,
+                                      ),
+                                label: sessionState.isLoading
+                                    ? SizedBox(
+                                        width: 24,
+                                        height: 24,
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                          valueColor: AlwaysStoppedAnimation<Color>(
+                                            colors.buttonForeground,
+                                          ),
+                                        ),
+                                      )
+                                    : Text(
+                                        'Finished',
+                                        style: TextStyle(
+                                          fontSize: 18 * ss,
+                                          fontWeight: FontWeight.w700,
+                                          fontFamily: 'Poppins',
+                                        ),
+                                      ),
                               ),
                             ),
                             SizedBox(height: 10 * sy),

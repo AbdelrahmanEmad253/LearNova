@@ -12,7 +12,7 @@ import 'package:learnova/features/home/presentation/providers/home_providers.dar
 import 'package:learnova/features/island_map/presentation/widgets/island_node_widget.dart';
 import 'package:learnova/features/island_map/presentation/widgets/island_path_connector.dart';
 import 'package:learnova/features/home/presentation/screens/level_modules_screen.dart';
-import 'package:learnova/features/home/presentation/screens/module_quiz_screen.dart';
+import 'package:learnova/features/home/presentation/screens/level_preexam_screen.dart';
 
 class IslandMapScreen extends ConsumerStatefulWidget {
   const IslandMapScreen({super.key});
@@ -161,7 +161,15 @@ class _IslandMapScreenState extends ConsumerState<IslandMapScreen> {
     // Calculate total height
     double totalHeight = 0;
     for (final level in levelsData) {
-      totalHeight += 40; // Reduced space (no title)
+      if (level.levelNumber == 1) {
+        // Level 1 might have both Foundation (Level 0) and Track (Level 1)
+        bool hasFoundation = level.modules.any((m) => m.isFoundation);
+        bool hasTrack = level.modules.any((m) => !m.isFoundation);
+        if (hasFoundation) totalHeight += 160;
+        if (hasTrack) totalHeight += 160;
+      } else {
+        totalHeight += 160; // Normal Level Title
+      }
       totalHeight += level.modules.length * nodeSpacingY;
       if (level.isExamAvailable) {
         totalHeight += nodeSpacingY + 40; // Extra space for large centered exam
@@ -192,6 +200,14 @@ class _IslandMapScreenState extends ConsumerState<IslandMapScreen> {
     );
   }
 
+  double _getTitleX(int levelNumber, double centerX, double xOffset) {
+    if (levelNumber == 0) return centerX;
+    if (levelNumber == 1) return centerX + xOffset; // Right
+    if (levelNumber == 2) return centerX - xOffset; // Left
+    if (levelNumber == 3) return centerX - xOffset; // Left
+    return centerX;
+  }
+
   List<Offset> _calculatePathPoints(double screenWidth, double spacingY, List<LevelModulesData> levelsData) {
     final List<Offset> points = [];
     final double centerX = screenWidth / 2;
@@ -201,9 +217,29 @@ class _IslandMapScreenState extends ConsumerState<IslandMapScreen> {
     double currentY = 100.0;
 
     for (final level in levelsData) {
-      currentY += 40; // spacing between levels
+      bool addedFoundationTitle = false;
+      bool addedLevel1Title = false;
+
+      if (level.levelNumber != 1) {
+        points.add(Offset(_getTitleX(level.levelNumber, centerX, xOffset), currentY));
+        currentY += 160;
+      }
       
       for (int i = 0; i < level.modules.length; i++) {
+        final module = level.modules[i];
+
+        if (level.levelNumber == 1) {
+          if (module.isFoundation && !addedFoundationTitle) {
+            points.add(Offset(_getTitleX(0, centerX, xOffset), currentY));
+            currentY += 160;
+            addedFoundationTitle = true;
+          } else if (!module.isFoundation && !addedLevel1Title) {
+            points.add(Offset(_getTitleX(1, centerX, xOffset), currentY));
+            currentY += 160;
+            addedLevel1Title = true;
+          }
+        }
+
         final double x = (globalIndex % 2 == 0) ? centerX - xOffset : centerX + xOffset;
         points.add(Offset(x, currentY));
         currentY += spacingY;
@@ -221,6 +257,35 @@ class _IslandMapScreenState extends ConsumerState<IslandMapScreen> {
     return points;
   }
 
+  Widget _buildLevelTitle(String title) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        SvgPicture.asset(
+          'assets/map/leftwing.svg',
+          width: 24,
+          height: 24,
+        ),
+        const SizedBox(width: 12),
+        Text(
+          title,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 28,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+        const SizedBox(width: 12),
+        SvgPicture.asset(
+          'assets/map/rightwing.svg',
+          width: 24,
+          height: 24,
+        ),
+      ],
+    );
+  }
+
   List<Widget> _buildAllNodes(BuildContext context, double screenWidth, double spacingY, List<LevelModulesData> levelsData, WidgetRef ref) {
     final List<Widget> nodes = [];
     final double centerX = screenWidth / 2;
@@ -231,11 +296,53 @@ class _IslandMapScreenState extends ConsumerState<IslandMapScreen> {
     double currentY = 100.0;
 
     for (final level in levelsData) {
-      currentY += 40;
+      bool addedFoundationTitle = false;
+      bool addedLevel1Title = false;
+
+      if (level.levelNumber != 1) {
+        final titleX = _getTitleX(level.levelNumber, centerX, xOffset);
+        nodes.add(
+          Positioned(
+            top: currentY - 20,
+            left: titleX - 150,
+            width: 300,
+            child: Center(child: _buildLevelTitle('Level ${level.levelNumber}')),
+          ),
+        );
+        currentY += 160;
+      }
 
       // Add Module Islands
       for (int i = 0; i < level.modules.length; i++) {
         final module = level.modules[i];
+
+        if (level.levelNumber == 1) {
+          if (module.isFoundation && !addedFoundationTitle) {
+            final titleX = _getTitleX(0, centerX, xOffset);
+            nodes.add(
+              Positioned(
+                top: currentY - 20,
+                left: titleX - 150,
+                width: 300,
+                child: Center(child: _buildLevelTitle('Level 0')),
+              ),
+            );
+            currentY += 160;
+            addedFoundationTitle = true;
+          } else if (!module.isFoundation && !addedLevel1Title) {
+            final titleX = _getTitleX(1, centerX, xOffset);
+            nodes.add(
+              Positioned(
+                top: currentY - 20,
+                left: titleX - 150,
+                width: 300,
+                child: Center(child: _buildLevelTitle('Level 1')),
+              ),
+            );
+            currentY += 160;
+            addedLevel1Title = true;
+          }
+        }
         final bool isLeft = globalIndex % 2 == 0;
         final String asset = isLeft 
             ? AppAssets.islandLeft(level.levelNumber) 
@@ -265,6 +372,7 @@ class _IslandMapScreenState extends ConsumerState<IslandMapScreen> {
                     examId: level.examId,
                     isLastModule:
                         module.moduleNumber == level.modules.length,
+                    mapNodeId: nodeId,
                   ),
                   routeName: AppRoutePaths.homeLevelModules,
                 );
@@ -296,11 +404,10 @@ class _IslandMapScreenState extends ConsumerState<IslandMapScreen> {
               onTap: () {
                 AppRouter.push(
                   context,
-                  ModuleQuizScreen(
-                    module: level.modules.isNotEmpty ? level.modules.first : LevelModule(
-                      id: '', levelNumber: level.levelNumber, moduleNumber: 0, moduleName: '', courseTitle: '', sections: [], contentItems: [], progressPercentage: 0
-                    ),
-                    quizId: level.examId,
+                  LevelPreExamScreen(
+                    levelNumber: level.levelNumber,
+                    examId: level.examId,
+                    isModuleExam: false,
                   ),
                   routeName: AppRoutePaths.homeLevelPreExam,
                 );

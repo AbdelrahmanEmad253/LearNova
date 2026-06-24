@@ -9,10 +9,10 @@ void main() {
     await SupabaseConfig.initialize();
 
     try {
-      final levels = await SupabaseConfig.client.from('levels').select();
-      print('LEVELS: $levels');
-      final courses = await SupabaseConfig.client.from('courses').select();
-      print('COURSES: $courses');
+      final qs = await SupabaseConfig.client.from('level_assessment_questions').select('id, assessment_id, difficulty, order_index');
+      print('LEVEL EXAM Qs: $qs');
+      final levels = await SupabaseConfig.client.from('level_assessments').select('id, level_id');
+      print('LEVEL ASSESSMENTS: $levels');
     } catch (e) {
       print('Error: $e');
     }

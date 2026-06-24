@@ -10,7 +10,7 @@ import 'package:learnova/core/theme/app_colors_theme.dart';
 import 'package:learnova/core/widgets/custom_button.dart';
 import 'package:learnova/features/home/domain/entities/level_module.dart';
 import 'package:learnova/features/home/presentation/screens/module_content_screen.dart';
-import 'package:learnova/features/home/presentation/screens/module_quiz_screen.dart';
+import 'package:learnova/features/home/presentation/screens/level_preexam_screen.dart';
 
 import '../providers/home_providers.dart';
 
@@ -19,11 +19,13 @@ class LevelModulesScreen extends ConsumerWidget {
   final String examId;
   final bool isLastModule;
   final bool showCustomPreExam;
+  final String mapNodeId;
 
   const LevelModulesScreen({
     super.key,
     required this.module,
     required this.examId,
+    required this.mapNodeId,
     this.isLastModule = false,
     this.showCustomPreExam = false,
   });
@@ -36,6 +38,7 @@ class LevelModulesScreen extends ConsumerWidget {
         examId: examId,
         showCustomPreExam: showCustomPreExam,
         isLastModule: isLastModule,
+        mapNodeId: mapNodeId,
       ),
       routeName: AppRoutePaths.homeModuleContent,
     );
@@ -179,15 +182,18 @@ class LevelModulesScreen extends ConsumerWidget {
                     ),
                   ),
             const SizedBox(height: 32),
-            if (currentModule.progressPercentage >= 0.99 && sections.isNotEmpty) ...[
+            if (!currentModule.isFoundation && currentModule.progressPercentage >= 0.99 && sections.isNotEmpty) ...[
               CustomButton(
                 text: 'Take Module Exam',
                 onPressed: () {
                   AppRouter.push(
                     context,
-                    ModuleQuizScreen(
+                    LevelPreExamScreen(
+                      levelNumber: module.levelNumber,
+                      examId: currentModule.id,
+                      isModuleExam: true,
                       module: currentModule,
-                      quizId: currentModule.id,
+                      mapNodeId: mapNodeId,
                     ),
                     routeName: AppRoutePaths.homeLevelPreExam,
                   );

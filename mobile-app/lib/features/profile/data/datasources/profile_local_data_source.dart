@@ -8,6 +8,8 @@ class ProfileLocalDataSource {
     return const ProfileDataModel(
       username: 'Honda@847',
       rank: 'Novice',
+      totalXp: 0,
+      xpProgress: 0.0,
       journeyCompletion: 0.12,
       timeStatus: [
         TimeStatusPointModel(label: 'Per Level', value: 2.0),
@@ -25,10 +27,10 @@ class ProfileLocalDataSource {
         PerkItemModel(
           imagePath: AppAssets.profileSliFox,
           name: 'Sli-Fox RX50',
-          subtitle: 'Grants you a hint once',
+          count: 0,
         ),
-        PerkItemModel(name: '???', subtitle: '?????'),
-        PerkItemModel(name: '???', subtitle: '?????'),
+        PerkItemModel(name: '???', count: 0),
+        PerkItemModel(name: '???', count: 0),
       ],
       badges: [
         BadgeItemModel(label: 'Amateur Brain', isLocked: false),

@@ -11,16 +11,77 @@ import 'package:learnova/features/assessment/domain/entities/assessment_test.dar
 import 'package:learnova/features/assessment/presentation/providers/assessment_providers.dart';
 import 'package:learnova/core/constants/app_assets.dart';
 import 'package:learnova/features/assessment/presentation/screens/mitchy_results_screen.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+
+import 'dart:async';
+import 'package:learnova/features/profile/presentation/providers/profile_providers.dart';
 
 import '../../../../core/widgets/app_background.dart';
-class FinalResultsSummaryScreen extends ConsumerWidget {
+
+final userAvatarUrlProvider = FutureProvider.autoDispose<String?>((ref) async {
+  final supabase = Supabase.instance.client;
+  final userId = supabase.auth.currentUser?.id;
+  if (userId == null) return null;
+  
+  final res = await supabase
+      .from('users')
+      .select('avatar_url')
+      .eq('id', userId)
+      .maybeSingle();
+      
+  return res?['avatar_url'] as String?;
+});
+
+class FinalResultsSummaryScreen extends ConsumerStatefulWidget {
   const FinalResultsSummaryScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<FinalResultsSummaryScreen> createState() => _FinalResultsSummaryScreenState();
+}
+
+class _FinalResultsSummaryScreenState extends ConsumerState<FinalResultsSummaryScreen> {
+  Timer? _pollingTimer;
+  bool _hasTriggeredAi = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _startAiAndPolling();
+  }
+
+  Future<void> _startAiAndPolling() async {
+    // Start polling immediately
+    _pollingTimer = Timer.periodic(const Duration(seconds: 3), (timer) {
+      if (mounted) {
+        ref.invalidate(diagnosticResultsProvider);
+      }
+    });
+
+    // Trigger AI analysis once
+    if (!_hasTriggeredAi) {
+      _hasTriggeredAi = true;
+      try {
+        await ref.read(learnovaApiServiceProvider).runScoringEngine();
+      } catch (e) {
+        debugPrint('Auto AI Trigger failed: $e');
+      }
+    }
+  }
+
+  @override
+  void dispose() {
+    _pollingTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+    final isDark = colors.isDark;
+
     final testsAsync = ref.watch(assessmentTestsProvider);
     final resultsAsync = ref.watch(diagnosticResultsProvider);
-    final colors = AppColors.of(context);
+    final avatarAsync = ref.watch(userAvatarUrlProvider);
 
     return testsAsync.when(
       loading: () => Scaffold(
@@ -64,6 +125,12 @@ class FinalResultsSummaryScreen extends ConsumerWidget {
 
             final filteredResults = latestResultsMap.values.toList()
               ..sort((a, b) => (a['test_number'] as int).compareTo(b['test_number'] as int));
+
+            // Stop polling if we have all 5 tests graded
+            final allScored = filteredResults.length >= 5 && !filteredResults.any((r) => r['computed_scores'] == null);
+            if (allScored && _pollingTimer != null && _pollingTimer!.isActive) {
+              _pollingTimer?.cancel();
+            }
 
             return Scaffold(
               backgroundColor: Colors.transparent,
@@ -190,11 +257,42 @@ class FinalResultsSummaryScreen extends ConsumerWidget {
                                         ),
                                       ),
                                       ClipOval(
-                                        child: SvgPicture.asset(
-                                          AppAssets.avatar1,
-                                          width: 226,
-                                          height: 226,
-                                          fit: BoxFit.cover,
+                                        child: avatarAsync.when(
+                                          data: (url) {
+                                            if (url != null && url.isNotEmpty) {
+                                              return Image.network(
+                                                url,
+                                                width: 226,
+                                                height: 226,
+                                                fit: BoxFit.cover,
+                                                errorBuilder: (context, error, stackTrace) {
+                                                  return SvgPicture.asset(
+                                                    AppAssets.avatar1,
+                                                    width: 226,
+                                                    height: 226,
+                                                    fit: BoxFit.cover,
+                                                  );
+                                                },
+                                              );
+                                            }
+                                            return SvgPicture.asset(
+                                              AppAssets.avatar1,
+                                              width: 226,
+                                              height: 226,
+                                              fit: BoxFit.cover,
+                                            );
+                                          },
+                                          loading: () => const SizedBox(
+                                            width: 226,
+                                            height: 226,
+                                            child: Center(child: CircularProgressIndicator()),
+                                          ),
+                                          error: (_, __) => SvgPicture.asset(
+                                            AppAssets.avatar1,
+                                            width: 226,
+                                            height: 226,
+                                            fit: BoxFit.cover,
+                                          ),
                                         ),
                                       ),
                                     ],
@@ -233,29 +331,62 @@ class FinalResultsSummaryScreen extends ConsumerWidget {
 
                             CustomButton(
                               text: 'Finish',
-                              onPressed: () {
+                              onPressed: () async {
                                 String track = 'Undetermined Track';
-                                String diploma = 'General Diploma';
+                                String learningStyle = 'Unknown Learning Style';
+                                String userName = 'Explorer';
                                 
-                                if (filteredResults.isNotEmpty) {
-                                  for (var res in filteredResults) {
-                                    final computed = res['computed_scores'] as Map<String, dynamic>?;
-                                    if (computed != null) {
-                                      if (computed.containsKey('assigned_track')) {
-                                        track = computed['assigned_track'].toString();
-                                      }
-                                      if (computed.containsKey('diploma_name')) {
-                                        diploma = computed['diploma_name'].toString();
-                                      } else if (computed.containsKey('dominant_style')) {
-                                        diploma = "${computed['dominant_style']} Diploma";
-                                      }
+                                try {
+                                  final supabase = Supabase.instance.client;
+                                  
+                                  // Fetch user's full name
+                                  final userRes = await supabase
+                                      .from('users')
+                                      .select('full_name')
+                                      .eq('id', supabase.auth.currentUser!.id)
+                                      .maybeSingle();
+                                      
+                                  if (userRes != null && userRes['full_name'] != null) {
+                                    userName = userRes['full_name'] as String;
+                                  }
+
+                                  // Fetch profile details
+                                  final profile = await supabase
+                                      .from('student_profiles')
+                                      .select('assigned_track, learning_style')
+                                      .eq('user_id', supabase.auth.currentUser!.id)
+                                      .maybeSingle();
+
+                                  if (profile != null) {
+                                    final assignedTrack = profile['assigned_track'] as String?;
+                                    if (assignedTrack == 'DA') {
+                                      track = 'Data Analysis Track';
+                                    } else if (assignedTrack == 'DE') {
+                                      track = 'Data Engineering Track';
+                                    } else if (assignedTrack == 'DS') {
+                                      track = 'Data Science Track';
+                                    } else if (assignedTrack != null) {
+                                      track = assignedTrack;
+                                    }
+
+                                    final style = profile['learning_style'] as String?;
+                                    if (style != null && style.isNotEmpty) {
+                                      learningStyle = style;
                                     }
                                   }
+                                } catch (e) {
+                                  debugPrint('Error fetching profile for results: $e');
                                 }
 
+                                if (!context.mounted) return;
+                                ref.invalidate(profileDataProvider);
                                 AppRouter.pushReplacement(
                                   context,
-                                  MitchyResultsScreen(diplomaName: diploma, trackName: track),
+                                  MitchyResultsScreen(
+                                    userName: userName,
+                                    learningStyle: learningStyle, 
+                                    trackName: track
+                                  ),
                                 );
                               },
                             ),
@@ -285,6 +416,33 @@ class FinalResultsSummaryScreen extends ConsumerWidget {
       if (computed.containsKey('dominant_style')) return computed['dominant_style'].toString();
       if (computed.containsKey('assigned_track')) return computed['assigned_track'].toString();
       
+      // 3. Fallback to extracting the highest scoring feature
+      if (computed.containsKey('features')) {
+        final features = computed['features'];
+        if (features is Map<String, dynamic> && features.isNotEmpty) {
+          String highestFeature = '';
+          num highestScore = -double.infinity;
+
+          features.forEach((key, value) {
+            if (value is num && value > highestScore) {
+              highestScore = value;
+              highestFeature = key;
+            }
+          });
+
+          if (highestFeature.isNotEmpty) {
+            // Capitalize the first letter and replace underscores with spaces
+            return highestFeature
+                .replaceAll('_', ' ')
+                .split(' ')
+                .map((word) => word.isNotEmpty
+                    ? '${word[0].toUpperCase()}${word.substring(1)}'
+                    : '')
+                .join(' ');
+          }
+        }
+      }
+
       // Default success message if status is scored
       return 'Analyzed';
     }

@@ -3,6 +3,7 @@ class ContentItemPayload {
   final String title;
   final String contentType;
   final String meta;
+  final String? topicId;
 
   /// The actual media URL (Supabase Storage URL, YouTube link, etc.).
   /// Null when content is text-only or the URL hasn't been resolved yet.
@@ -13,6 +14,7 @@ class ContentItemPayload {
     required this.title,
     required this.contentType,
     required this.meta,
+    this.topicId,
     this.mediaUrl,
   });
 }

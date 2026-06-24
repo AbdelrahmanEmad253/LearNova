@@ -16,7 +16,7 @@ import 'package:learnova/features/content/presentation/screens/content_document_
 import 'package:learnova/features/content/presentation/screens/mitchy_chat_screen.dart';
 import 'package:learnova/features/content/presentation/screens/content_video_player.dart';
 import 'package:learnova/features/home/domain/entities/level_module.dart';
-import 'package:learnova/features/home/presentation/screens/module_quiz_screen.dart';
+import 'package:learnova/features/home/presentation/screens/level_preexam_screen.dart';
 import 'package:learnova/features/home/presentation/providers/home_providers.dart';
 import 'package:learnova/features/auth/presentation/providers/avatar_providers.dart';
 import 'package:learnova/features/island_map/domain/entities/topic.dart';
@@ -28,6 +28,7 @@ class ModuleContentScreen extends ConsumerStatefulWidget {
   final String examId;
   final bool showCustomPreExam;
   final bool isLastModule;
+  final String mapNodeId;
 
   const ModuleContentScreen({
     super.key,
@@ -35,6 +36,7 @@ class ModuleContentScreen extends ConsumerStatefulWidget {
     required this.examId,
     required this.showCustomPreExam,
     required this.isLastModule,
+    required this.mapNodeId,
   });
 
   @override
@@ -216,6 +218,9 @@ class _ModuleContentScreenState extends ConsumerState<ModuleContentScreen> {
   String _primaryActionLabel(
       ContentItemPayload? selectedItem, bool moduleCompleted) {
     if (moduleCompleted) {
+      if (widget.module.isFoundation) {
+        return 'Continue';
+      }
       return 'Take Quiz';
     }
     if (selectedItem == null) {
@@ -227,12 +232,19 @@ class _ModuleContentScreenState extends ConsumerState<ModuleContentScreen> {
   Future<void> _onPrimaryActionPressed(BuildContext context,
       bool moduleCompleted, List<ContentItemPayload> items) async {
     if (moduleCompleted) {
+      if (widget.module.isFoundation) {
+        AppRouter.pop(context);
+        return;
+      }
+
       await AppRouter.push(
         context,
-        ModuleQuizScreen(
+        LevelPreExamScreen(
+          levelNumber: widget.module.levelNumber,
+          examId: widget.module.id,
+          isModuleExam: true,
           module: widget.module,
-          quizId:
-              'exam_da_l${widget.module.levelNumber}_m${widget.module.moduleNumber}',
+          mapNodeId: widget.mapNodeId,
         ),
         routeName: AppRoutePaths.homeLevelPreExam,
       );
@@ -261,21 +273,6 @@ class _ModuleContentScreenState extends ConsumerState<ModuleContentScreen> {
         final isTopicCompleted = completedItems.contains(topic.id);
         if (!isTopicCompleted) continue;
 
-        // Sync resource logs if any exist
-        if (topic.resources.isNotEmpty) {
-          for (final res in topic.resources) {
-            try {
-              await supabase.from('student_resource_logs').upsert({
-                'user_id': user.id,
-                'topic_id': topic.id,
-                'resource_type': res.formatType,
-                'completed': true,
-              }, onConflict: 'user_id,topic_id,resource_type');
-            } catch (e) {
-              debugPrint('Failed to sync resource log: $e');
-            }
-          }
-        }
 
         // Sync overall topic progress to 'completed'
         final status = 'completed';
@@ -442,6 +439,7 @@ class _ModuleContentScreenState extends ConsumerState<ModuleContentScreen> {
           title: topic.title,
           contentType: 'text',
           meta: 'No resource available',
+          topicId: topic.id,
         ));
         continue;
       }
@@ -455,6 +453,7 @@ class _ModuleContentScreenState extends ConsumerState<ModuleContentScreen> {
           contentType: _contentTypeForFormat(resource.formatType),
           meta: _metaForFormat(resource.formatType),
           mediaUrl: resource.resourceUrl,
+          topicId: topic.id,
         ));
       }
     }

@@ -12,6 +12,8 @@ import 'package:learnova/features/assessment/presentation/screens/test_descripti
 import 'package:learnova/features/assessment/presentation/screens/final_results_summary_screen.dart';
 import 'package:learnova/core/navigation/main_navigation_screen.dart';
 import 'package:learnova/features/home/presentation/providers/home_providers.dart';
+import 'package:learnova/features/profile/presentation/providers/profile_providers.dart';
+import 'package:learnova/features/auth/presentation/providers/auth_providers.dart';
 import 'package:learnova/core/constants/app_assets.dart';
 
 class TestCompleteScreen extends ConsumerStatefulWidget {
@@ -21,6 +23,7 @@ class TestCompleteScreen extends ConsumerStatefulWidget {
   final int? scorePercentage;
   final String? sourceNodeId;
   final bool? didPass;
+  final Future<Map<String, dynamic>>? evaluationFuture;
 
   const TestCompleteScreen({
     super.key,
@@ -30,6 +33,7 @@ class TestCompleteScreen extends ConsumerStatefulWidget {
     this.scorePercentage,
     this.sourceNodeId,
     this.didPass,
+    this.evaluationFuture,
   });
 
   @override
@@ -76,53 +80,83 @@ class _TestCompleteScreenState extends ConsumerState<TestCompleteScreen> {
     final currentResult = tests[widget.testIndex];
     final bool isLastTest = widget.testIndex == tests.length - 1;
     final String title = widget.standaloneTitle ?? currentResult.title;
-    final bool showNumericScore = widget.scorePercentage != null;
+
+    if (widget.evaluationFuture != null) {
+      return FutureBuilder<Map<String, dynamic>>(
+        future: widget.evaluationFuture,
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.waiting) {
+            return _buildLoadingState(context, currentResult, size, title, colors);
+          }
+          if (snapshot.hasError) {
+            return _buildResultState(context, currentResult, size, title, null, false, 0, tests, isLastTest, snapshot.error.toString(), colors);
+          }
+          
+          final data = snapshot.data;
+          final int score = (data?['score'] as num?)?.toInt() ?? 0;
+          final bool passed = (data?['passed'] as bool?) ?? false;
+          final int xp = (data?['xp_awarded'] as num?)?.toInt() ?? (data?['xp'] as num?)?.toInt() ?? 0;
+          return _buildResultState(context, currentResult, size, title, score, passed, xp, tests, isLastTest, null, colors);
+        },
+      );
+    } else {
+      return _buildResultState(context, currentResult, size, title, widget.scorePercentage, widget.didPass, 100, tests, isLastTest, null, colors);
+    }
+  }
+
+  Widget _buildLoadingState(BuildContext context, AssessmentTest currentResult, Size size, String title, AppColors colors) {
+    return SpaceScaffold(
+      topWavePaths: const [AppAssets.testStartTop],
+      bottomWavePaths: const [AppAssets.testMiniBottom],
+      child: SafeArea(
+        child: SizedBox(
+          width: double.infinity,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 40.0),
+            child: Column(
+                children: [
+                  const SizedBox(height: 60),
+                  SvgPicture.asset(
+                    currentResult.iconPath,
+                    width: 80,
+                    height: 80,
+                    colorFilter: ColorFilter.mode(colors.textPrimary, BlendMode.srcIn),
+                  ),
+                  const SizedBox(height: 20),
+                  Text(
+                    title,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: colors.textPrimary, fontSize: 26, fontWeight: FontWeight.bold),
+                  ),
+                  const Spacer(flex: 2),
+                  CircularProgressIndicator(color: colors.primary),
+                  const SizedBox(height: 24),
+                  Text(
+                    'We are evaluating your exam...\nPlease wait a few moments.',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: colors.textPrimary, fontSize: 18, height: 1.5, fontWeight: FontWeight.w500),
+                  ),
+                  const Spacer(flex: 3),
+                ],
+              ),
+            ),
+            ),
+          ));
+
+  }
+
+  Widget _buildResultState(BuildContext context, AssessmentTest currentResult, Size size, String title, int? scorePercentage, bool? didPass, int xpEarned, List<AssessmentTest> tests, bool isLastTest, String? error, AppColors colors) {
+    final bool showNumericScore = scorePercentage != null;
 
     return SpaceScaffold(
-      child: Stack(
-        children: [
-          // Base Top SVG (Constant Background Shape)
-          Positioned(
-            top: size.height * 0.29,
-            left: 0,
-            right: 0,
-            child: SvgPicture.asset(
-              AppAssets.testStartTop,
-              width: size.width,
-              fit: BoxFit.fitWidth,
-              alignment: Alignment.topCenter,
-            ),
-          ),
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: SvgPicture.asset(
-              currentResult.topSvgPath,
-              width: size.width,
-              fit: BoxFit.fitWidth,
-              alignment: Alignment.topCenter,
-            ),
-          ),
-
-          // Bottom SVG Layer (Using minibot.svg)
-          Positioned(
-            bottom: 0,
-            left: 0,
-            right: 0,
-            child: SvgPicture.asset(
-              AppAssets.testMiniBottom,
-              width: size.width,
-              fit: BoxFit.fitWidth,
-              alignment: Alignment.bottomCenter,
-            ),
-          ),
-
-          // Content Layer
-          SafeArea(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 40.0),
-              child: Column(
+      topWavePaths: const [AppAssets.testStartTop],
+      bottomWavePaths: const [AppAssets.testMiniBottom],
+      child: SafeArea(
+        child: SizedBox(
+          width: double.infinity,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 40.0),
+            child: Column(
                 children: [
                   const SizedBox(height: 60),
                   SvgPicture.asset(
@@ -142,6 +176,14 @@ class _TestCompleteScreenState extends ConsumerState<TestCompleteScreen> {
                       fontWeight: FontWeight.bold,
                     ),
                   ),
+                  if (error != null) ...[
+                    const SizedBox(height: 20),
+                    Text(
+                      error,
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: Colors.red.shade400, fontSize: 14),
+                    ),
+                  ],
                   const Spacer(flex: 2),
                   if (showNumericScore) ...[
                     Container(
@@ -164,7 +206,7 @@ class _TestCompleteScreenState extends ConsumerState<TestCompleteScreen> {
                     ),
                     const SizedBox(height: 18),
                     Text(
-                      '${widget.scorePercentage!.clamp(0, 100)}%',
+                      '${scorePercentage.clamp(0, 100)}%',
                       style: TextStyle(
                         color: colors.primary,
                         fontSize: 56,
@@ -216,7 +258,7 @@ class _TestCompleteScreenState extends ConsumerState<TestCompleteScreen> {
                       borderRadius: BorderRadius.circular(24),
                     ),
                     child: Text(
-                      '+157 EXP points gained!',
+                      '+$xpEarned EXP points gained!',
                       style: TextStyle(
                         color: colors.primary,
                         fontSize: 20,
@@ -249,12 +291,15 @@ class _TestCompleteScreenState extends ConsumerState<TestCompleteScreen> {
                         : (isLastTest ? 'Finish All Quizzes' : 'Next Quiz'),
                     onPressed: () {
                       if (widget.returnToMapOnContinue) {
-                        if (widget.didPass == true &&
+                        if (didPass == true &&
                             widget.sourceNodeId != null) {
                           ref
                               .read(mapUnlockProvider.notifier)
                               .markPassed(widget.sourceNodeId!);
+                          ref.invalidate(globalMapProvider);
                         }
+                        ref.invalidate(studentProfileProvider);
+                        ref.invalidate(profileDataProvider);
                         Navigator.of(context).pushAndRemoveUntil(
                           MaterialPageRoute(
                             builder: (_) => const MainNavigationScreen(),
@@ -284,8 +329,6 @@ class _TestCompleteScreenState extends ConsumerState<TestCompleteScreen> {
               ),
             ),
           ),
-        ],
-      ),
-    );
+    ));
   }
 }

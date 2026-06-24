@@ -2,10 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import 'package:learnova/core/constants/app_assets.dart';
+import 'package:learnova/core/navigation/app_route_paths.dart';
+import 'package:learnova/core/navigation/app_router.dart';
 import 'package:learnova/core/theme/app_colors_theme.dart';
 import 'package:learnova/core/theme/app_colors.dart';
 import 'package:learnova/core/widgets/app_background.dart';
 import 'package:learnova/core/widgets/app_top_bar.dart';
+import 'package:learnova/features/assessment/presentation/screens/test_questions_screen.dart';
 import 'package:learnova/features/weekly_challenge/data/models/challenge_schedule_model.dart';
 import 'package:learnova/features/weekly_challenge/presentation/providers/weekly_challenge_provider.dart';
 import 'package:learnova/features/weekly_challenge/presentation/widgets/weekly_challenge_badge.dart';
@@ -194,7 +197,7 @@ class WeeklyChallengeScreen extends ConsumerWidget {
           const SizedBox(height: 24),
           
           // Action & Countdown Area
-          _buildActionArea(schedule, state.countdownString, colors),
+          _buildActionArea(context, schedule, state.countdownString, colors),
         ],
       ),
     );
@@ -267,7 +270,7 @@ class WeeklyChallengeScreen extends ConsumerWidget {
     );
   }
 
-  Widget _buildActionArea(ChallengeScheduleModel schedule, String countdown, AppColors colors) {
+  Widget _buildActionArea(BuildContext context, ChallengeScheduleModel schedule, String countdown, AppColors colors) {
     final status = schedule.status;
     
     bool isActionable = status == 'available' || status == 'started';
@@ -292,7 +295,20 @@ class WeeklyChallengeScreen extends ConsumerWidget {
           height: 56,
           child: ElevatedButton(
             onPressed: isActionable ? () {
-              // TODO: Navigate to challenge exam taking screen
+              final challengeId = schedule.challengeId;
+              final details = schedule.challengeDetails;
+              AppRouter.push(
+                context,
+                TestQuestionsScreen(
+                  testIndex: 0,
+                  quizId: challengeId,
+                  totalQuestions: 15,
+                  returnToHomeOnFinish: true,
+                  completionTitle: details?.title ?? 'Weekly Challenge',
+                  challengeId: challengeId,
+                ),
+                routeName: AppRoutePaths.testQuestions,
+              );
             } : null,
             style: ElevatedButton.styleFrom(
               backgroundColor: colors.primary,
@@ -315,10 +331,13 @@ class WeeklyChallengeScreen extends ConsumerWidget {
         const SizedBox(height: 32),
         
         WeeklyChallengeCountdownPill(
-          prefix: status == 'available' || status == 'started' 
-              ? 'Closes in' 
-              : 'Next in',
-          countdown: countdown,
+          prefix: status == 'locked' 
+              ? 'Locked' 
+              : (status == 'available' || status == 'started' 
+                  ? 'Closes in' 
+                  : 'Next in'),
+          countdown: status == 'locked' ? '' : countdown,
+          isLocked: status == 'locked',
         ),
       ],
     );

@@ -11,7 +11,8 @@ import 'package:learnova/core/widgets/space_scaffold.dart';
 import 'package:learnova/core/widgets/custom_button.dart';
 import 'package:learnova/features/assessment/domain/entities/assessment_test.dart';
 import 'package:learnova/features/assessment/presentation/providers/assessment_providers.dart';
-import 'package:learnova/features/assessment/presentation/screens/testing_format_screen.dart';
+import 'package:learnova/core/widgets/app_top_bar.dart';
+import 'package:learnova/features/assessment/presentation/screens/test_description_screen.dart';
 import 'package:learnova/core/constants/app_assets.dart';
 
 class AssessmentMapScreen extends ConsumerStatefulWidget {
@@ -182,13 +183,20 @@ class _AssessmentMapScreenState extends ConsumerState<AssessmentMapScreen> {
                 const Spacer(flex: 3),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 40.0),
-                  child: CustomButton(
-                    text: 'Next',
-                    onPressed: () {
-                      AppRouter.push(
-                        context,
-                        const TestingFormatScreen(),
-                        routeName: AppRoutePaths.testingFormat,
+                  child: Consumer(
+                    builder: (context, ref, child) {
+                      final diagnosticResultsAsync = ref.watch(diagnosticResultsProvider);
+                      final completedCount = diagnosticResultsAsync.value?.length ?? 0;
+                      
+                      return CustomButton(
+                        text: completedCount > 0 ? 'Resume Assessment' : 'Start Assessment',
+                        onPressed: () {
+                          AppRouter.push(
+                            context,
+                            TestDescriptionScreen(testIndex: completedCount),
+                            routeName: AppRoutePaths.testDescription,
+                          );
+                        },
                       );
                     },
                   ),

@@ -7,6 +7,8 @@ class LevelModule {
   final List<ModuleSection> sections;
   final List<ModuleContentItem> contentItems;
   final double progressPercentage;
+  final bool isExamPassed;
+  final bool isFoundation;
 
   const LevelModule({
     required this.id,
@@ -17,6 +19,8 @@ class LevelModule {
     required this.sections,
     required this.contentItems,
     required this.progressPercentage,
+    this.isExamPassed = false,
+    this.isFoundation = false,
   });
 }
 

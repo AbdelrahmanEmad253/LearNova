@@ -55,12 +55,17 @@ class IslandMapRemoteDataSource {
           .select('*, topic_resources(*)')
           .eq('module_id', moduleId)
           .eq('is_active', true)
-          .order('order_index')
+          .order('order_index', ascending: true)
           .timeout(const Duration(seconds: 10));
 
-      return List<Map<String, dynamic>>.from(raw)
+      final topics = List<Map<String, dynamic>>.from(raw)
           .map((e) => TopicModel.fromJson(e))
           .toList();
+          
+      // Ensure strictly sorted by orderIndex
+      topics.sort((a, b) => a.orderIndex.compareTo(b.orderIndex));
+      
+      return topics;
     } catch (e) {
       rethrow;
     }
