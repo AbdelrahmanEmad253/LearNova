@@ -14,7 +14,6 @@ class RankEntryTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bool isPositive = entry.pointsChange >= 0;
     final colors = AppColors.of(context);
 
     return Row(
@@ -84,19 +83,10 @@ class RankEntryTile extends StatelessWidget {
         Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(
-              isPositive
-                  ? Icons.arrow_drop_up_rounded
-                  : Icons.arrow_drop_down_rounded,
-              color:
-                  isPositive ? ColorManager.primary : ColorManager.dangerBright,
-              size: 22,
-            ),
             Text(
-              '${entry.pointsChange.abs()}',
+              '${entry.xp} XP',
               style: TextStyle(
-                color:
-                    isPositive ? ColorManager.primary : ColorManager.dangerBright,
+                color: ColorManager.primary,
                 fontSize: 13,
                 fontWeight: FontWeight.w800,
               ),

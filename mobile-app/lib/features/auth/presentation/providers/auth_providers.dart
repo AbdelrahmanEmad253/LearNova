@@ -20,6 +20,11 @@ import 'package:learnova/features/auth/domain/usecases/resend_confirmation_email
 import 'package:learnova/features/auth/data/datasources/student_profile_local_data_source.dart';
 import 'package:learnova/features/auth/data/datasources/student_profile_remote_data_source.dart';
 import 'package:learnova/features/auth/domain/entities/student_profile.dart';
+import 'package:learnova/features/auth/data/models/student_profile_model.dart';
+import 'package:entrig/entrig.dart';
+
+import 'package:learnova/features/content/presentation/controllers/mitchy_chat_controller.dart';
+import 'package:learnova/features/notifications/presentation/providers/notifications_providers.dart';
 
 // ── Data Sources ──
 
@@ -92,31 +97,54 @@ final getCurrentSessionUseCaseProvider =
 
 // ── Reactive Session State ──
 
-final authSessionStreamProvider = StreamProvider<AuthSession?>((ref) {
-  return ref.watch(observeSessionUseCaseProvider).call();
+final authSessionStreamProvider = StreamProvider<AuthSession?>((ref) async* {
+  final stream = ref.watch(observeSessionUseCaseProvider).call();
+  
+  await for (final session in stream) {
+    if (session != null) {
+      // Register device for push notifications when user is logged in
+      Entrig.register(userId: session.userId);
+    } else {
+      // Unregister when logged out
+      Entrig.unregister();
+    }
+    yield session;
+  }
 });
 
 final currentSessionProvider = Provider<AuthSession?>((ref) {
   return ref.watch(getCurrentSessionUseCaseProvider).call();
 });
 
-final studentProfileProvider = FutureProvider<StudentProfile?>((ref) async {
-  // Regenerate when auth state changes
-  ref.watch(authSessionStreamProvider);
+final studentProfileProvider = StreamProvider<StudentProfile?>((ref) async* {
+  final session = ref.watch(authSessionStreamProvider).value;
+  if (session == null) {
+    yield null;
+    return;
+  }
 
-  final remoteDS = ref.watch(studentProfileRemoteDataSourceProvider);
+  final client = ref.watch(supabaseClientProvider);
   final localDS = ref.watch(studentProfileLocalDataSourceProvider);
 
-  try {
-    final profile = await remoteDS.fetchProfile();
+  // Fallback to local cache initially while stream connects
+  final cached = await localDS.getCachedProfile();
+  if (cached != null) yield cached;
+
+  final stream = client
+      .from('student_profiles')
+      .stream(primaryKey: ['user_id'])
+      .eq('user_id', session.userId)
+      .map((list) {
+        if (list.isEmpty) return null;
+        return StudentProfileModel.fromJson(list.first);
+      });
+
+  await for (final profile in stream) {
     if (profile != null) {
       await localDS.cacheProfile(profile);
-      return profile;
     }
-  } catch (_) {}
-
-  // Fallback to local cache if remote fails or returns null
-  return localDS.getCachedProfile();
+    yield profile;
+  }
 });
 
 // ── Auth Controller (actions) ──
@@ -186,6 +214,13 @@ class AuthController extends AsyncNotifier<void> {
   Future<void> signOut() async {
     state = const AsyncLoading();
     state = await AsyncValue.guard(_signOutUseCase.call);
+    
+    // Clear the notification cache from SharedPreferences
+    await ref.read(notificationsCacheProvider).clear();
+    
+    // Invalidate global providers so they don't leak state into the next user session
+    ref.invalidate(mitchyChatControllerProvider);
+    ref.invalidate(notificationsDataProvider);
   }
 
   Future<void> resendConfirmationEmail(String email) async {

@@ -4,16 +4,19 @@ import 'package:learnova/core/navigation/app_route_paths.dart';
 import 'package:learnova/core/navigation/app_router.dart';
 import 'package:learnova/core/navigation/main_navigation_screen.dart';
 import 'package:learnova/core/widgets/app_background.dart';
+import 'package:learnova/core/theme/app_colors.dart';
 import 'package:learnova/core/theme/app_colors_theme.dart';
 import 'package:learnova/core/widgets/custom_button.dart';
 
 class MitchyResultsScreen extends StatefulWidget {
-  final String diplomaName;
+  final String userName;
+  final String learningStyle;
   final String trackName;
 
   const MitchyResultsScreen({
     super.key,
-    required this.diplomaName,
+    required this.userName,
+    required this.learningStyle,
     required this.trackName,
   });
 
@@ -22,40 +25,44 @@ class MitchyResultsScreen extends StatefulWidget {
 }
 
 class _MitchyResultsScreenState extends State<MitchyResultsScreen> with TickerProviderStateMixin {
-  late final AnimationController _diplomaFadeController;
-  late final AnimationController _trackFadeController;
+  int _step = 0;
   bool _showButton = false;
 
   @override
   void initState() {
     super.initState();
-    _diplomaFadeController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 600),
-    );
-    _trackFadeController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 600),
-    );
+    _startStep();
   }
 
-  @override
-  void dispose() {
-    _diplomaFadeController.dispose();
-    _trackFadeController.dispose();
-    super.dispose();
+  void _startStep() async {
+    setState(() {
+      _showButton = false;
+    });
+
+    if (_step == 1 || _step == 2) {
+      await Future.delayed(const Duration(milliseconds: 1000));
+      if (mounted) {
+        setState(() {
+          _showButton = true;
+        });
+      }
+    }
   }
 
-  Future<void> _startFadeSequence() async {
-    await _diplomaFadeController.forward();
-    await Future.delayed(const Duration(milliseconds: 300));
-    await _trackFadeController.forward();
-
-    // Show button instead of navigating with delay
-    if (mounted) {
+  void _onNextPressed() async {
+    if (_step < 2) {
       setState(() {
-        _showButton = true;
+        _showButton = false;
       });
+      await Future.delayed(const Duration(milliseconds: 600)); // wait for button slide
+      if (mounted) {
+        setState(() {
+          _step++;
+        });
+        _startStep();
+      }
+    } else {
+      _navigateToNext();
     }
   }
 
@@ -80,6 +87,111 @@ class _MitchyResultsScreenState extends State<MitchyResultsScreen> with TickerPr
     }
   }
 
+  String _getLearningStyleSubtext() {
+    final style = widget.learningStyle.toLowerCase();
+    if (style.contains('visual')) {
+      return "You learn best through images, charts, and spatial understanding.";
+    } else if (style.contains('auditory')) {
+      return "You learn best through listening, speaking, and sound.";
+    } else if (style.contains('read') || style.contains('write')) {
+      return "You learn best through reading texts and writing notes.";
+    } else if (style.contains('kinesthetic')) {
+      return "You learn best through hands-on experience and practice.";
+    }
+    return "You have a unique and blended way of learning.";
+  }
+
+  String _getTrackSubtext() {
+    final track = widget.trackName.toLowerCase();
+    if (track.contains('analysis')) {
+      return "Discover the stories hidden within data and drive decisions.";
+    } else if (track.contains('engineering')) {
+      return "Build the robust pipelines that power modern data platforms.";
+    } else if (track.contains('science')) {
+      return "Apply advanced algorithms to predict the future and create AI.";
+    } else if (track.contains('software')) {
+      return "Design and build software systems that solve real world problems.";
+    }
+    return "Explore various fields to find your perfect technical path.";
+  }
+
+  Widget _buildStepContent(Color textColor, List<Shadow> textShadows, Color styleColor, List<Shadow> styleShadows, Color trackColor, List<Shadow> trackShadows) {
+    if (_step == 0) {
+      return SizedBox(
+        key: const ValueKey(0),
+        height: 140,
+        child: Center(
+          child: _CustomTypewriterText(
+            text: "Hi ${widget.userName}! I am Mitchy. I have analyzed your personality, and I am your AI friend and guide.",
+            style: TextStyle(
+              fontSize: 22,
+              fontWeight: FontWeight.w600,
+              height: 1.4,
+              color: textColor,
+              shadows: textShadows,
+            ),
+            textAlign: TextAlign.center,
+            onFinished: () {
+              if (mounted) {
+                setState(() {
+                  _showButton = true;
+                });
+              }
+            },
+          ),
+        ),
+      );
+    } else if (_step == 1) {
+      return Column(
+        key: const ValueKey(1),
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            "Your Learning Style is:",
+            style: TextStyle(color: styleColor, fontSize: 22, fontWeight: FontWeight.w600, shadows: styleShadows),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 12),
+          Text(
+            widget.learningStyle,
+            style: TextStyle(color: styleColor, fontSize: 36, fontWeight: FontWeight.bold, shadows: styleShadows),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 24),
+          Text(
+            _getLearningStyleSubtext(),
+            style: TextStyle(color: textColor, fontSize: 18, height: 1.4, shadows: textShadows),
+            textAlign: TextAlign.center,
+          ),
+        ],
+      );
+    } else {
+      return Column(
+        key: const ValueKey(2),
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            "Your Track is:",
+            style: TextStyle(color: trackColor, fontSize: 22, fontWeight: FontWeight.w600, shadows: trackShadows),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 12),
+          Text(
+            widget.trackName,
+            style: TextStyle(color: trackColor, fontSize: 36, fontWeight: FontWeight.bold, shadows: trackShadows),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 24),
+          Text(
+            _getTrackSubtext(),
+            style: TextStyle(color: textColor, fontSize: 18, height: 1.4, shadows: textShadows),
+            textAlign: TextAlign.center,
+          ),
+        ],
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
@@ -90,10 +202,10 @@ class _MitchyResultsScreenState extends State<MitchyResultsScreen> with TickerPr
     final textShadows = _createShadows(textColor, isDark);
 
     // Diploma and Track text
-    final diplomaColor = isDark ? const Color(0xFF4DB8FF) : Colors.blue.shade700;
-    final trackColor = isDark ? const Color(0xFFFF71CE) : Colors.deepPurple.shade600;
+    final learningStyleColor = ColorManager.accentCyan;
+    final trackColor = ColorManager.subtitlesActive;
     
-    final diplomaShadows = _createShadows(diplomaColor, isDark);
+    final learningStyleShadows = _createShadows(learningStyleColor, isDark);
     final trackShadows = _createShadows(trackColor, isDark);
 
     return Scaffold(
@@ -107,57 +219,36 @@ class _MitchyResultsScreenState extends State<MitchyResultsScreen> with TickerPr
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.center,
                 children: [
-                  const SizedBox(height: 40), // Safe space up
-                  const _MitchyAvatar(size: 180), // Bigger bouncing Mitchy
+                  const SizedBox(height: 40),
+                  const _MitchyAvatar(size: 240), // Increased Mitchy size to 240
                   const Spacer(),
                   
-                  // Custom Typewriter Effect
-                  SizedBox(
-                    height: 120,
-                    child: _CustomTypewriterText(
-                      text: "Hello! I am Mitchy. I have analyzed your personality, and I am your AI friend and guide.",
-                      style: TextStyle(
-                        fontSize: 22,
-                        fontWeight: FontWeight.w600,
-                        height: 1.4,
-                        color: textColor,
-                        shadows: textShadows,
-                      ),
-                      textAlign: TextAlign.center,
-                      onFinished: _startFadeSequence,
-                    ),
+                  // Animated Step Content
+                  AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 800),
+                    child: _buildStepContent(textColor, textShadows, learningStyleColor, learningStyleShadows, trackColor, trackShadows),
                   ),
                   
-                  const SizedBox(height: 30),
-                  
-                  _FadeSlideText(
-                    text: "Your Diploma is: ${widget.diplomaName}",
-                    color: diplomaColor,
-                    shadows: diplomaShadows,
-                    controller: _diplomaFadeController,
-                  ),
-                  const SizedBox(height: 16),
-                  _FadeSlideText(
-                    text: "Your Track is: ${widget.trackName}",
-                    color: trackColor,
-                    shadows: trackShadows,
-                    controller: _trackFadeController,
-                  ),
                   const Spacer(),
                   
-                  // Start Learning Button
-                  AnimatedOpacity(
-                    opacity: _showButton ? 1.0 : 0.0,
-                    duration: const Duration(milliseconds: 500),
-                    child: IgnorePointer(
-                      ignoring: !_showButton,
-                      child: CustomButton(
-                        text: 'Start Learning',
-                        onPressed: _navigateToNext,
+                  // Start Learning Button sliding down/up
+                  AnimatedSlide(
+                    offset: Offset(0, _showButton ? 0 : 3.0),
+                    duration: const Duration(milliseconds: 600),
+                    curve: Curves.easeInOutCubic,
+                    child: AnimatedOpacity(
+                      opacity: _showButton ? 1.0 : 0.0,
+                      duration: const Duration(milliseconds: 400),
+                      child: IgnorePointer(
+                        ignoring: !_showButton,
+                        child: CustomButton(
+                          text: _step == 2 ? 'Start Learning' : 'Next',
+                          onPressed: _onNextPressed,
+                        ),
                       ),
                     ),
                   ),
-                  const Spacer(),
+                  const SizedBox(height: 40),
                 ],
               ),
             ),
@@ -170,7 +261,7 @@ class _MitchyResultsScreenState extends State<MitchyResultsScreen> with TickerPr
 
 class _MitchyAvatar extends StatefulWidget {
   final double size;
-  const _MitchyAvatar({Key? key, this.size = 180}) : super(key: key);
+  const _MitchyAvatar({Key? key, this.size = 240}) : super(key: key);
 
   @override
   State<_MitchyAvatar> createState() => _MitchyAvatarState();
@@ -206,6 +297,8 @@ class _MitchyAvatarState extends State<_MitchyAvatar> with SingleTickerProviderS
 
   @override
   Widget build(BuildContext context) {
+    final colors = AppColors.of(context);
+
     return AnimatedBuilder(
       animation: _controller,
       builder: (context, child) {
@@ -217,23 +310,20 @@ class _MitchyAvatarState extends State<_MitchyAvatar> with SingleTickerProviderS
               width: widget.size,
               height: widget.size,
               decoration: BoxDecoration(
-                color: Colors.blue.shade50,
                 shape: BoxShape.circle,
-                border: Border.all(color: Colors.blue.shade300, width: 3),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.blue.withValues(alpha: 0.3 * _scale.value),
-                    blurRadius: 20,
-                    offset: const Offset(0, 10),
+                    color: colors.primary.withValues(alpha: 0.5 * _scale.value),
+                    blurRadius: 40,
+                    spreadRadius: 10,
+                    offset: const Offset(0, 15),
                   ),
                 ],
               ),
-              child: ClipOval(
-                child: Image.asset(
-                  'assets/avatar/Mitchy.png',
-                  fit: BoxFit.cover,
-                  errorBuilder: (context, error, stackTrace) => Icon(Icons.smart_toy_rounded, size: widget.size / 2, color: Colors.blue),
-                ),
+              child: Image.asset(
+                'assets/avatar/Mitchy.png',
+                fit: BoxFit.contain,
+                errorBuilder: (context, error, stackTrace) => Icon(Icons.smart_toy_rounded, size: widget.size / 2, color: colors.primary),
               ),
             ),
           ),
@@ -299,44 +389,6 @@ class _CustomTypewriterTextState extends State<_CustomTypewriterText> {
       widget.text.substring(0, _currentIndex),
       style: widget.style,
       textAlign: widget.textAlign,
-    );
-  }
-}
-
-class _FadeSlideText extends StatelessWidget {
-  final String text;
-  final Color color;
-  final List<Shadow>? shadows;
-  final AnimationController controller;
-
-  const _FadeSlideText({
-    Key? key,
-    required this.text,
-    required this.color,
-    this.shadows,
-    required this.controller,
-  }) : super(key: key);
-
-  @override
-  Widget build(BuildContext context) {
-    return FadeTransition(
-      opacity: CurvedAnimation(parent: controller, curve: Curves.easeIn),
-      child: SlideTransition(
-        position: Tween<Offset>(
-          begin: const Offset(0, 0.3),
-          end: Offset.zero,
-        ).animate(CurvedAnimation(parent: controller, curve: Curves.easeOutCubic)),
-        child: Text(
-          text,
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            fontSize: 24,
-            fontWeight: FontWeight.bold,
-            color: color,
-            shadows: shadows,
-          ),
-        ),
-      ),
     );
   }
 }

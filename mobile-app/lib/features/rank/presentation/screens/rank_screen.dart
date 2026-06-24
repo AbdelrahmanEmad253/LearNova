@@ -43,7 +43,7 @@ class RankScreen extends ConsumerWidget {
                     name: 'You',
                     userTag: '#000000',
                     position: data.leaderboard.length + 1,
-                    pointsChange: 0,
+                    xp: 0,
                     isCurrentUser: true,
                   ),
                 );
@@ -225,7 +225,9 @@ class RankScreen extends ConsumerWidget {
             right: 0,
             child: AppTopBar(
               topPadding: topPadding, 
-              title: asyncData.asData?.value.screenTitle ?? 'Leaderboard'
+              title: asyncData.asData?.value.screenTitle ?? 'Leaderboard',
+              rankName: asyncData.asData?.value.currentRankName ?? 'Novice',
+              progress: asyncData.asData?.value.xpProgress ?? 0.0,
             ),
           ),
         ],
@@ -626,8 +628,6 @@ class _CurrentUserCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bool isPositive = entry.pointsChange >= 0;
-
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
       decoration: BoxDecoration(
@@ -694,20 +694,10 @@ class _CurrentUserCard extends StatelessWidget {
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(
-                isPositive
-                    ? Icons.arrow_drop_up_rounded
-                    : Icons.arrow_drop_down_rounded,
-                color:
-                    isPositive ? ColorManager.primary : ColorManager.dangerBright,
-                size: 24,
-              ),
               Text(
-                '${entry.pointsChange.abs()}',
+                '${entry.xp} XP',
                 style: TextStyle(
-                  color: isPositive
-                      ? ColorManager.primary
-                      : ColorManager.dangerBright,
+                  color: ColorManager.primary,
                   fontSize: 14,
                   fontWeight: FontWeight.w800,
                 ),

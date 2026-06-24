@@ -29,6 +29,15 @@ String _getRankName(int xp) {
   return 'Master of Wisdom';
 }
 
+double _getXpProgress(int xp) {
+  if (xp < 100) return xp / 100.0;
+  if (xp < 500) return (xp - 100) / (500 - 100);
+  if (xp < 1000) return (xp - 500) / (1000 - 500);
+  if (xp < 2000) return (xp - 1000) / (2000 - 1000);
+  if (xp < 5000) return (xp - 2000) / (5000 - 2000);
+  return 1.0;
+}
+
 final profileDataProvider = FutureProvider<ProfileData>((ref) async {
   final userDataService = ref.watch(profileUserDataServiceProvider);
   final activityService = ref.watch(profileActivityServiceProvider);
@@ -39,6 +48,8 @@ final profileDataProvider = FutureProvider<ProfileData>((ref) async {
   String username = 'User';
   String? avatarUrl;
   String rank = 'Novice Explorer';
+  int totalXp = 0;
+  double xpProgress = 0.0;
   double journeyCompletion = 0.0;
   List<TimeStatusPoint> timeStatus = [];
   List<ProfileInfoItem> infoItems = [];
@@ -54,15 +65,25 @@ final profileDataProvider = FutureProvider<ProfileData>((ref) async {
   // 2. Fetch student profile data (xp, track, level)
   final studentProfile = studentProfileAsync.value;
   if (studentProfile != null) {
-    rank = _getRankName(studentProfile.totalXp);
+    totalXp = studentProfile.totalXp;
+    rank = _getRankName(totalXp);
+    xpProgress = _getXpProgress(totalXp);
     
-    // We don't have current_level_index in StudentProfile entity yet, defaulting to 0 for completion
-    journeyCompletion = 0.0; 
-
+    final track = studentProfile.assignedTrack ?? '';
+    final style = studentProfile.learningStyle ?? '';
+    
+    if (track.isNotEmpty && style.isNotEmpty) {
+      journeyCompletion = await activityService.getJourneyCompletion(
+        track: track,
+        learningStyle: style,
+      );
+    } else {
+      journeyCompletion = 0.0;
+    }
     // Info items
     infoItems = [
       ProfileInfoItem(label: 'Rank', value: rank),
-      ProfileInfoItem(label: 'Track', value: studentProfile.zoneState ?? 'None'),
+      ProfileInfoItem(label: 'Track', value: studentProfile.assignedTrack?.isNotEmpty == true ? studentProfile.assignedTrack! : 'None'),
       ProfileInfoItem(label: 'Achievements', value: '${studentProfile.momentumStreak}'),
     ];
   } else {
@@ -93,10 +114,41 @@ final profileDataProvider = FutureProvider<ProfileData>((ref) async {
   weeklyActivity = trackingResults[4] as List<bool>;
   final activeStreak = trackingResults[5] as int;
 
-  // Static perks for now
+  // Fetch real perks
+  final client = ref.watch(supabaseClientProvider);
+  final user = client.auth.currentUser;
+  
+  int slyFoxCount = 0;
+  int owlCount = 0;
+  
+  if (user != null) {
+    try {
+      final perksData = await client
+          .from('student_perks')
+          .select('sly_fox_count, owl_hint_count')
+          .eq('user_id', user.id)
+          .maybeSingle();
+          
+      if (perksData != null) {
+        slyFoxCount = (perksData['sly_fox_count'] as num?)?.toInt() ?? 0;
+        owlCount = (perksData['owl_hint_count'] as num?)?.toInt() ?? 0;
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
   final perks = [
-    const PerkItem(name: 'Ad-free Experience', subtitle: 'Focus without interruptions'),
-    const PerkItem(name: 'Exclusive Content', subtitle: 'Access to premium materials'),
+    PerkItem(
+      name: 'Sli-Fox-RX50',
+      count: slyFoxCount,
+      imagePath: 'assets/profile/sli_fox_rx50.png',
+    ),
+    PerkItem(
+      name: 'Owl of Wisdom',
+      count: owlCount,
+      imagePath: 'assets/profile/owl_of_wisdom.png',
+    ),
   ];
 
   // Fetch real achievements
@@ -105,7 +157,8 @@ final profileDataProvider = FutureProvider<ProfileData>((ref) async {
     final dict = a['achievements_dictionary'] as Map<String, dynamic>?;
     return BadgeItem(
       label: dict?['label']?.toString() ?? 'Achievement', 
-      isLocked: false
+      isLocked: false,
+      imageUrl: dict?['badge_image_path']?.toString(),
     );
   }).toList();
   
@@ -118,10 +171,32 @@ final profileDataProvider = FutureProvider<ProfileData>((ref) async {
     infoItems[2] = ProfileInfoItem(label: 'Achievements', value: '${badges.where((b) => !b.isLocked).length}');
   }
 
+  // Fetch real rank from leaderboard
+  if (user != null) {
+    try {
+      final rankData = await client
+          .from('leaderboard_snapshots')
+          .select('rank_at_snapshot')
+          .eq('user_id', user.id)
+          .order('snapshot_date', ascending: false)
+          .limit(1)
+          .maybeSingle();
+          
+      if (rankData != null && rankData['rank_at_snapshot'] != null) {
+        final r = rankData['rank_at_snapshot'];
+        infoItems[0] = ProfileInfoItem(label: 'Rank', value: '#$r');
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
   return ProfileData(
     username: username,
     avatarUrl: avatarUrl,
     rank: rank,
+    totalXp: totalXp,
+    xpProgress: xpProgress,
     journeyCompletion: journeyCompletion,
     timeStatus: timeStatus,
     infoItems: infoItems,

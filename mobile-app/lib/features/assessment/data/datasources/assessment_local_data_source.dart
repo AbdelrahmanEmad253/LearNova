@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/cupertino.dart';
 import 'package:learnova/core/data/local_cache_data_source.dart';
 
 /// Local cache for assessment test data.
@@ -41,5 +42,45 @@ class AssessmentLocalDataSource {
     } catch (_) {
       return null;
     }
+  }
+
+  /// Cache in-progress diagnostic answers.
+  Future<void> cacheDiagnosticAnswers(String diagnosticTypeId, List<Map<String, dynamic>> answers) async {
+    final key = 'cache.diagnostic_answers.$diagnosticTypeId';
+    try {
+      final encoded = jsonEncode(answers);
+      await _cache.put(key, encoded);
+      debugPrint('[AssessmentLocalDataSource] Cached ${answers.length} answers for $diagnosticTypeId');
+    } catch (e) {
+      debugPrint('[AssessmentLocalDataSource] Error encoding cached answers: $e');
+    }
+  }
+
+  /// Retrieve cached in-progress diagnostic answers.
+  List<Map<String, dynamic>>? getCachedDiagnosticAnswers(String diagnosticTypeId) {
+    final key = 'cache.diagnostic_answers.$diagnosticTypeId';
+    final jsonString = _cache.get(key);
+    if (jsonString == null) {
+      debugPrint('[AssessmentLocalDataSource] No cache found for $diagnosticTypeId');
+      return null;
+    }
+
+    try {
+      final decoded = jsonDecode(jsonString) as List<dynamic>;
+      final result = decoded
+          .map((e) => Map<String, dynamic>.from(e as Map))
+          .toList(growable: false);
+      debugPrint('[AssessmentLocalDataSource] Successfully loaded ${result.length} cached answers for $diagnosticTypeId');
+      return result;
+    } catch (e) {
+      debugPrint('[AssessmentLocalDataSource] Error decoding cached answers for $diagnosticTypeId: $e');
+      return null;
+    }
+  }
+
+  /// Clear cached diagnostic answers (usually called upon successful submission).
+  Future<void> clearCachedDiagnosticAnswers(String diagnosticTypeId) async {
+    final key = 'cache.diagnostic_answers.$diagnosticTypeId';
+    await _cache.remove(key);
   }
 }

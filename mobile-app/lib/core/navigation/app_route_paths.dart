@@ -16,7 +16,6 @@ class AppRoutePaths {
   static const String onboardingWelcome = '/onboarding/welcome';
   static const String onboardingIntroSteps = '/onboarding/intro-steps';
   static const String assessmentMap = '/assessment/map';
-  static const String testingFormat = '/assessment/testing-format';
   static const String testDescription = '/assessment/test-description';
   static const String testQuestions = '/assessment/test-questions';
   static const String testComplete = '/assessment/test-complete';

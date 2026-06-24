@@ -11,8 +11,12 @@ import 'package:learnova/core/theme/app_colors_theme.dart';
 import 'package:learnova/features/content/domain/entities/content_item_payload.dart';
 import 'package:learnova/features/content/domain/services/article_extractor_service.dart';
 import 'package:learnova/features/content/presentation/controllers/document_reader_controller.dart';
+import 'package:learnova/features/curriculum/presentation/notifiers/topic_session_notifier.dart';
+import 'package:learnova/features/curriculum/presentation/providers/topic_progress_provider.dart';
 import 'package:learnova/features/home/presentation/providers/home_providers.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import 'package:syncfusion_flutter_pdfviewer/pdfviewer.dart';
 
 class DocumentReaderPlaceholderScreen extends ConsumerStatefulWidget {
   final ContentItemPayload item;
@@ -45,6 +49,9 @@ class _DocumentReaderPlaceholderScreenState
 
   /// true = reader mode (extracted text), false = web view mode.
   bool _readerMode = true;
+
+  AppLifecycleListener? _lifecycleListener;
+  ({String topicId, String userId, String formatType})? _sessionArgs;
 
   /// Whether article extraction is in progress.
   bool _extracting = false;
@@ -89,6 +96,16 @@ class _DocumentReaderPlaceholderScreenState
     return null;
   }
 
+  bool get _isPdf {
+    final contentType = widget.item.contentType.toLowerCase();
+    if (contentType == 'pdf') return true;
+    
+    final url = _resolvedMediaUrl()?.toLowerCase() ?? '';
+    if (url.endsWith('.pdf')) return true;
+
+    return false;
+  }
+
   @override
   void initState() {
     super.initState();
@@ -105,22 +122,42 @@ class _DocumentReaderPlaceholderScreenState
       );
     }
 
+    final userId = Supabase.instance.client.auth.currentUser?.id;
+    final topicId = widget.item.topicId;
+    if (userId != null && topicId != null) {
+      _sessionArgs = (userId: userId, topicId: topicId, formatType: widget.item.contentType);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        ref.read(topicSessionNotifierProvider.notifier).init(_sessionArgs!);
+        ref.read(topicSessionNotifierProvider.notifier).startSession();
+      });
+      _lifecycleListener = AppLifecycleListener(
+        onPause: () => ref.read(topicSessionNotifierProvider.notifier).pauseSession(),
+        onResume: () => ref.read(topicSessionNotifierProvider.notifier).resumeSession(),
+        onHide: () => ref.read(topicSessionNotifierProvider.notifier).flushTelemetry(),
+      );
+    }
+
     if (_hasWebUrl) {
       final String mediaUrl = _resolvedMediaUrl()!;
 
-      // Initialize WebView (used as fallback or toggle target).
-      _docWebViewController = WebViewController()
-        ..setJavaScriptMode(JavaScriptMode.unrestricted)
-        ..setNavigationDelegate(NavigationDelegate(
-          onPageFinished: (_) {
-            if (mounted) setState(() => _webViewLoading = false);
-          },
-        ))
-        ..loadRequest(Uri.parse(mediaUrl));
+      if (_isPdf) {
+        _readerMode = false;
+        _webViewLoading = false; // SfPdfViewer handles its own loading.
+      } else {
+        // Initialize WebView (used as fallback or toggle target).
+        _docWebViewController = WebViewController()
+          ..setJavaScriptMode(JavaScriptMode.unrestricted)
+          ..setNavigationDelegate(NavigationDelegate(
+            onPageFinished: (_) {
+              if (mounted) setState(() => _webViewLoading = false);
+            },
+          ))
+          ..loadRequest(Uri.parse(mediaUrl));
 
-      // Attempt article extraction.
-      if (_controller == null) {
-        _extractArticle(mediaUrl);
+        // Attempt article extraction.
+        if (_controller == null) {
+          _extractArticle(mediaUrl);
+        }
       }
     }
   }
@@ -151,6 +188,7 @@ class _DocumentReaderPlaceholderScreenState
 
   @override
   void dispose() {
+    _lifecycleListener?.dispose();
     _controller?.dispose();
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     super.dispose();
@@ -263,14 +301,23 @@ class _DocumentReaderPlaceholderScreenState
     );
   }
 
-  void _onFinishPressed() {
+  Future<void> _onFinishPressed() async {
     if (widget.moduleId != null) {
       ref.read(moduleProgressProvider.notifier).markItemCompleted(
             moduleId: widget.moduleId!,
             itemId: widget.item.id,
           );
     }
-    AppRouter.pop(context);
+
+    if (_sessionArgs != null) {
+      final notifier = ref.read(topicSessionNotifierProvider.notifier);
+      await notifier.consumeResource('Textual');
+      await notifier.completeTopic();
+    }
+
+    if (mounted) {
+      AppRouter.pop(context);
+    }
   }
 
   void _toggleMode() {
@@ -285,6 +332,7 @@ class _DocumentReaderPlaceholderScreenState
 
   @override
   Widget build(BuildContext context) {
+    ref.watch(topicSessionNotifierProvider);
     // If extracting, show a loading screen.
     if (_extracting) {
       return _buildLoadingState(context);
@@ -295,8 +343,8 @@ class _DocumentReaderPlaceholderScreenState
       return _buildReaderLayout(context);
     }
 
-    // WebView mode.
-    if (_docWebViewController != null) {
+    // WebView or PDF mode.
+    if (_docWebViewController != null || _isPdf) {
       return _buildWebViewLayout(context);
     }
 
@@ -468,9 +516,15 @@ class _DocumentReaderPlaceholderScreenState
                 child: Stack(
                   children: [
                     Positioned.fill(
-                      child: _docWebViewController != null
-                          ? WebViewWidget(controller: _docWebViewController!)
-                          : const SizedBox.shrink(),
+                      child: _isPdf
+                          ? SfPdfViewer.network(
+                              _resolvedMediaUrl()!,
+                              canShowScrollHead: false,
+                              canShowScrollStatus: false,
+                            )
+                          : (_docWebViewController != null
+                              ? WebViewWidget(controller: _docWebViewController!)
+                              : const SizedBox.shrink()),
                     ),
                     if (_webViewLoading)
                       Positioned.fill(

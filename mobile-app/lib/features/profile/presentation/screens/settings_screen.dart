@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:learnova/core/widgets/app_background.dart';
+import 'package:learnova/core/widgets/custom_button.dart';
 import 'package:learnova/core/navigation/app_router.dart';
+import 'package:learnova/features/profile/presentation/providers/reminder_settings_notifier.dart';
 
 import 'package:learnova/core/theme/app_colors_theme.dart';
 import 'package:learnova/core/theme/app_theme_provider.dart';
@@ -21,12 +23,43 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   int _selectedMinute = 0;
   bool _emailReminder = false;
   bool _pushNotification = false;
+  bool _initialized = false;
 
   @override
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
     final themeMode = ref.watch(themeModeProvider);
     final isDarkMode = themeMode == ThemeMode.dark;
+
+    final reminderState = ref.watch(reminderSettingsNotifierProvider);
+
+    if (!_initialized && !reminderState.isLoading) {
+      _selectedHour = reminderState.time?.hour ?? 0;
+      _selectedMinute = reminderState.time?.minute ?? 0;
+      _emailReminder = reminderState.isEmail;
+      _pushNotification = reminderState.isPush;
+      _initialized = true;
+    }
+
+    ref.listen<ReminderSettingsState>(reminderSettingsNotifierProvider, (previous, next) {
+      if (next.isSuccess && (previous == null || !previous.isSuccess)) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Reminder saved successfully!'),
+            backgroundColor: Colors.green,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      } else if (next.errorMessage != null && next.errorMessage != previous?.errorMessage) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error: ${next.errorMessage}'),
+            backgroundColor: Colors.red,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    });
 
     return Scaffold(
       backgroundColor: colors.background,
@@ -234,6 +267,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
   // ── Notifications ──
   Widget _buildNotificationsSection(AppColors colors) {
+    final reminderState = ref.watch(reminderSettingsNotifierProvider);
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -306,6 +341,21 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 onChanged:
                     (v) => setState(() => _pushNotification = v ?? false),
               ),
+              const SizedBox(height: 24),
+              reminderState.isLoading
+                  ? const Center(child: CircularProgressIndicator())
+                  : CustomButton(
+                      text: 'Save',
+                      onPressed: () {
+                        ref.read(reminderSettingsNotifierProvider.notifier).saveReminderSettings(
+                              time: TimeOfDay(hour: _selectedHour, minute: _selectedMinute),
+                              isEmail: _emailReminder,
+                              isPush: _pushNotification,
+                            );
+                      },
+                      backgroundColor: colors.primary,
+                      textColor: Colors.white,
+                    ),
             ],
           ),
         ),
@@ -331,6 +381,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
         ),
         child: CupertinoDatePicker(
+          key: ValueKey(_initialized),
           mode: CupertinoDatePickerMode.time,
           initialDateTime: DateTime(0, 0, 0, _selectedHour, _selectedMinute),
           onDateTimeChanged: (DateTime newDateTime) {

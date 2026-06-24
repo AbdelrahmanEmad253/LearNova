@@ -17,6 +17,7 @@ class NotificationItem {
   final String title;
   final String description;
   final String timeLabel;
+  final String? deeplink;
   final bool isUnread;
 
   const NotificationItem({
@@ -24,6 +25,7 @@ class NotificationItem {
     required this.title,
     required this.description,
     required this.timeLabel,
+    this.deeplink,
     this.isUnread = false,
   });
 }

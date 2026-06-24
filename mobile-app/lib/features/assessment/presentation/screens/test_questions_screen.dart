@@ -20,24 +20,30 @@ class TestQuestionsScreen extends ConsumerStatefulWidget {
   final int testIndex;
   final String? diagnosticTestTypeId;
   final String? quizId;
+  final String? challengeId;
+  final bool isLevelExam;
   final int totalQuestions;
   final bool returnToHomeOnFinish;
   final String? completionTitle;
   final String? sourceNodeId;
   final int passThreshold;
   final List<Map<String, dynamic>>? initialQuestions;
+  final String? difficulty;
 
   const TestQuestionsScreen({
     super.key,
     required this.testIndex,
-    this.diagnosticTestTypeId,
+    this.initialQuestions,
     this.quizId,
-    this.totalQuestions = 3,
+    this.challengeId,
+    this.isLevelExam = false,
+    this.diagnosticTestTypeId,
+    this.totalQuestions = 5,
+    this.passThreshold = 70,
     this.returnToHomeOnFinish = false,
     this.completionTitle,
     this.sourceNodeId,
-    this.passThreshold = 60,
-    this.initialQuestions,
+    this.difficulty,
   });
 
   @override
@@ -57,6 +63,14 @@ class _TestQuestionsScreenState extends ConsumerState<TestQuestionsScreen> {
   /// Tracks which perk just fired so we can show the cast effect overlay.
   ExamPerk? _activeCastEffect;
 
+  final TextEditingController _essayController = TextEditingController();
+
+  @override
+  void dispose() {
+    _essayController.dispose();
+    super.dispose();
+  }
+
   @override
   void initState() {
     super.initState();
@@ -70,11 +84,26 @@ class _TestQuestionsScreenState extends ConsumerState<TestQuestionsScreen> {
       _dynamicQuestions = List<Map<String, dynamic>>.from(
         widget.initialQuestions!,
       );
+      _applyDiagnosticCache(_dynamicQuestions.length);
     } else if (widget.quizId != null && widget.quizId!.isNotEmpty) {
       // Module exam flow — fetch by quiz_id
       _loadExamQuestions();
     } else if (!widget.returnToHomeOnFinish) {
       _loadDynamicQuestions();
+    }
+  }
+
+  void _applyDiagnosticCache(int totalQuestions) {
+    if (_isExamFlow || _isChallengeFlow || _isLevelExamFlow) return;
+
+    final localDS = ref.read(assessmentLocalDataSourceProvider);
+    final cachedAnswers = localDS.getCachedDiagnosticAnswers(_diagnosticTestTypeId);
+    
+    if (cachedAnswers != null && cachedAnswers.isNotEmpty) {
+      _userRawAnswers.clear();
+      _userRawAnswers.addAll(cachedAnswers);
+      final newCurrentIndex = _userRawAnswers.length;
+      _currentQuestionIndex = newCurrentIndex < totalQuestions ? newCurrentIndex : (totalQuestions > 0 ? totalQuestions - 1 : 0);
     }
   }
 
@@ -91,6 +120,9 @@ class _TestQuestionsScreenState extends ConsumerState<TestQuestionsScreen> {
       return;
     }
 
+    // Check for cached answers
+    _applyDiagnosticCache(questions.length);
+
     setState(() {
       _dynamicQuestions = questions;
       _isLoadingQuestions = false;
@@ -104,8 +136,20 @@ class _TestQuestionsScreenState extends ConsumerState<TestQuestionsScreen> {
 
     try {
       final diagnosticDS = ref.read(diagnosticRemoteDataSourceProvider);
-      final questions =
-          await diagnosticDS.fetchExamQuestions(widget.quizId!);
+      
+      final List<Map<String, dynamic>> questions;
+      
+      final rawDiff = (widget.difficulty ?? 'easy').toLowerCase();
+      final mappedDiff = rawDiff == 'medium' ? 'mid' : rawDiff;
+      
+      if (_isLevelExamFlow) {
+        questions = await diagnosticDS.fetchLevelExamQuestions(widget.quizId!, difficulty: mappedDiff);
+      } else {
+        questions = await diagnosticDS.fetchExamQuestions(
+          widget.quizId!,
+          difficulty: mappedDiff,
+        );
+      }
 
       if (!mounted) return;
 
@@ -122,6 +166,8 @@ class _TestQuestionsScreenState extends ConsumerState<TestQuestionsScreen> {
   }
 
   bool get _isExamFlow => widget.quizId != null && widget.quizId!.isNotEmpty;
+  bool get _isChallengeFlow => widget.challengeId != null && widget.challengeId!.isNotEmpty;
+  bool get _isLevelExamFlow => widget.isLevelExam;
 
   int _correctAnswerIndexForQuestion(int questionIndex) {
     // Use correct_answer_index from dynamic questions if available
@@ -178,6 +224,11 @@ class _TestQuestionsScreenState extends ConsumerState<TestQuestionsScreen> {
         },
       );
 
+      if (inserted) {
+        final localDS = ref.read(assessmentLocalDataSourceProvider);
+        localDS.clearCachedDiagnosticAnswers(_diagnosticTestTypeId);
+      }
+
       _lastSubmitError = null;
       return inserted;
     } catch (e) {
@@ -202,48 +253,79 @@ class _TestQuestionsScreenState extends ConsumerState<TestQuestionsScreen> {
   Future<void> _finishFlow(BuildContext context) async {
     final int resolvedTotalQuestions = _resolvedTotalQuestions;
 
-    if (_isExamFlow) {
-      // Calculate Score
-      int correctCount = 0;
-      for (int i = 0; i < _userRawAnswers.length; i++) {
-        final answer = _userRawAnswers[i];
-        final correctIdx = _correctAnswerIndexForQuestion(i);
-        if (answer['selected_index'] == correctIdx) {
-          correctCount++;
-        }
-      }
-      final questScore = ((correctCount / resolvedTotalQuestions) * 100).toInt();
+    final apiService = ref.read(learnovaApiServiceProvider);
 
-      // Submit to student_module_attempts
-      final diagnosticDS = ref.read(diagnosticRemoteDataSourceProvider);
-      bool inserted = false;
-      try {
-        inserted = await diagnosticDS.submitModuleExamResult(
-          moduleId: widget.quizId!,
-          score: questScore.toDouble(),
-          passed: questScore >= widget.passThreshold,
-          difficulty: 'mid',
-          answers: _userRawAnswers,
-        );
-      } catch (e) {
-        _lastSubmitError = e.toString();
-      }
+    // ── Challenge Exam Flow ──
+    if (_isChallengeFlow) {
+      final future = apiService.submitChallengeAttempt(
+        challengeId: widget.challengeId!,
+        answers: { 'answers': _userRawAnswers },
+      );
 
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              inserted
-                  ? 'Exam result saved successfully.'
-                  : (_lastSubmitError ?? 'Failed to save exam result.'),
-            ),
-            backgroundColor:
-                inserted ? Colors.green.shade700 : Colors.red.shade700,
+        AppRouter.pushReplacement(
+          context,
+          TestCompleteScreen(
+            testIndex: widget.testIndex,
+            returnToMapOnContinue: true,
+            standaloneTitle: widget.completionTitle ?? 'Weekly Challenge Complete',
+            sourceNodeId: widget.sourceNodeId,
+            evaluationFuture: future,
           ),
+          routeName: AppRoutePaths.testComplete,
         );
       }
+      return;
+    }
 
-      if (!inserted) return;
+    // ── Level Exam Flow ──
+    if (_isLevelExamFlow) {
+      final rawDiff = (widget.difficulty ?? 'mid').toLowerCase();
+      final mappedDiff = rawDiff == 'medium' ? 'mid' : rawDiff;
+
+      final future = apiService.submitLevelAttempt(
+        examId: widget.quizId!,
+        difficulty: mappedDiff,
+        answers: { 'answers': _userRawAnswers },
+      );
+
+      if (context.mounted) {
+        AppRouter.pushReplacement(
+          context,
+          TestCompleteScreen(
+            testIndex: widget.testIndex,
+            returnToMapOnContinue: true,
+            standaloneTitle: widget.completionTitle ?? 'Level Complete',
+            sourceNodeId: widget.sourceNodeId,
+            evaluationFuture: future,
+          ),
+          routeName: AppRoutePaths.testComplete,
+        );
+      }
+      return;
+    }
+
+    // ── Module Exam Flow ──
+    if (_isExamFlow) {
+      final rawDiff = (widget.difficulty ?? 'easy').toLowerCase();
+      final mappedDiff = rawDiff == 'medium' ? 'mid' : rawDiff;
+
+      final future = () async {
+        final diagnosticDS = ref.read(diagnosticRemoteDataSourceProvider);
+        final actualAssessmentId = await diagnosticDS.getAssessmentIdForModule(
+          widget.quizId!,
+          difficulty: mappedDiff,
+        );
+        if (actualAssessmentId == null) {
+          throw Exception('Assessment not found for this module.');
+        }
+
+        return apiService.submitModuleAttempt(
+          assessmentId: actualAssessmentId,
+          answers: { 'answers': _userRawAnswers },
+          difficulty: mappedDiff,
+        );
+      }();
 
       if (context.mounted) {
         AppRouter.pushReplacement(
@@ -253,8 +335,7 @@ class _TestQuestionsScreenState extends ConsumerState<TestQuestionsScreen> {
             returnToMapOnContinue: true,
             standaloneTitle: widget.completionTitle ?? 'Module Exam Complete',
             sourceNodeId: widget.sourceNodeId,
-            scorePercentage: questScore,
-            didPass: questScore >= widget.passThreshold,
+            evaluationFuture: future,
           ),
           routeName: AppRoutePaths.testComplete,
         );
@@ -391,7 +472,7 @@ class _TestQuestionsScreenState extends ConsumerState<TestQuestionsScreen> {
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Text(
-                    'No questions found for this quiz.',
+                    'No questions found for this quiz.\n(ID: ${widget.quizId}\nDifficulty: ${widget.difficulty})',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       color: colors.textTitle,
@@ -423,11 +504,14 @@ class _TestQuestionsScreenState extends ConsumerState<TestQuestionsScreen> {
 
     // Perk effects for the current question.
     String? perkHint;
-    int? eliminatedOptionIdx;
+    String? eliminatedOptionKey;
+    String? eliminatedOptionValue;
     if (_isExamFlow) {
       final perkState = ref.watch(perkDeckViewModelProvider);
       perkHint = perkState.hintForQuestion(currentQuestionId);
-      eliminatedOptionIdx =
+      eliminatedOptionKey =
+          perkState.eliminatedOptionKeyForQuestion(currentQuestionId);
+      eliminatedOptionValue =
           perkState.eliminatedOptionForQuestion(currentQuestionId);
     }
 
@@ -559,16 +643,59 @@ class _TestQuestionsScreenState extends ConsumerState<TestQuestionsScreen> {
                             const SizedBox(height: 16),
                             _buildHintCard(perkHint, colors),
                           ],
-                          const SizedBox(height: 32),
-                          ...List.generate(options.length, (index) {
-                            final optionText = options[index];
-                            bool isSelected = _selectedAnswerIndex == index;
-                            final bool isEliminated =
-                                eliminatedOptionIdx == index;
+                          const SizedBox(height: 30),
+                          
+                          if (_isLevelExamFlow) ...[
+                            // Essay Text Field for Level Exams
+                            TextField(
+                              controller: _essayController,
+                              maxLines: 8,
+                              onChanged: (text) {
+                                setState(() {});
+                              },
+                              style: TextStyle(
+                                color: colors.textPrimary,
+                                fontSize: 16,
+                              ),
+                              decoration: InputDecoration(
+                                hintText: 'Type your essay answer here...',
+                                hintStyle: TextStyle(
+                                  color: colors.textSecondary.withValues(alpha: 0.6),
+                                ),
+                                filled: true,
+                                fillColor: colors.cardBackground,
+                                border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                  borderSide: BorderSide(color: colors.borderWeak, width: 1),
+                                ),
+                                enabledBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                  borderSide: BorderSide(color: colors.borderWeak, width: 1),
+                                ),
+                                focusedBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(12),
+                                  borderSide: BorderSide(color: colors.primary, width: 2),
+                                ),
+                              ),
+                            ),
+                          ] else ...[
+                            // MCQ Options for other exams
+                            ...List.generate(options.length, (index) {
+                              final optionText = options[index];
+                              bool isSelected = _selectedAnswerIndex == index;
+                              final question = _dynamicQuestions.isNotEmpty 
+                                  ? _dynamicQuestions[_currentQuestionIndex] 
+                                  : null;
+                              final choiceValues = question?['choiceValues'] as List<dynamic>?;
+                              final optionValue = choiceValues?[index]?.toString() ?? optionText;
+                              
+                              final bool isEliminated =
+                                  (eliminatedOptionValue != null && eliminatedOptionValue == optionText) ||
+                                  (eliminatedOptionKey != null && eliminatedOptionKey == optionValue);
 
-                            return Padding(
-                              padding: const EdgeInsets.only(bottom: 16.0),
-                              child: GestureDetector(
+                              return Padding(
+                                padding: const EdgeInsets.only(bottom: 16.0),
+                                child: GestureDetector(
                                 onTap: isEliminated
                                     ? null // Eliminated options are not tappable
                                     : () {
@@ -616,6 +743,7 @@ class _TestQuestionsScreenState extends ConsumerState<TestQuestionsScreen> {
                               ),
                             );
                           }),
+                          ],
                           // Extra bottom spacing so content isn't hidden by perk deck
                           SizedBox(height: _isExamFlow ? 80 : 16),
                         ],
@@ -629,17 +757,38 @@ class _TestQuestionsScreenState extends ConsumerState<TestQuestionsScreen> {
                         ? 'Next Question'
                         : 'Finish Quiz',
                     backgroundColor: colors.buttonBackground,
-                    onPressed: _selectedAnswerIndex != null
+                    onPressed: (_isLevelExamFlow ? _essayController.text.trim().isNotEmpty : _selectedAnswerIndex != null)
                         ? () async {
-                            final question = _dynamicQuestions[_currentQuestionIndex];
-                            final options = _optionsForQuestion(_currentQuestionIndex);
+                            final question = _dynamicQuestions.isNotEmpty 
+                                ? _dynamicQuestions[_currentQuestionIndex] 
+                                : {'id': 'q$_currentQuestionIndex', 'question_key': 'key$_currentQuestionIndex'};
                             
-                            _userRawAnswers.add({
-                              'question_id': question['id'],
-                              'question_key': question['question_key'],
-                              'selected_index': _selectedAnswerIndex,
-                              'selected_label': options[_selectedAnswerIndex!],
-                            });
+                            if (_isLevelExamFlow) {
+                              _userRawAnswers.add({
+                                'question_id': question['id'],
+                                'question_key': question['question_key'],
+                                'essay_answer': _essayController.text.trim(),
+                              });
+                              _essayController.clear();
+                            } else {
+                              final options = _optionsForQuestion(_currentQuestionIndex);
+                              final choiceValues = question['choiceValues'] as List<dynamic>?;
+                              final value = choiceValues?[_selectedAnswerIndex!]?.toString() ?? options[_selectedAnswerIndex!];
+                              
+                                _userRawAnswers.add({
+                                  'question_id': question['id'],
+                                  'question_key': question['question_key'],
+                                  'selected_index': _selectedAnswerIndex,
+                                  'selected_label': options[_selectedAnswerIndex!],
+                                  'selected_value': value,
+                                  'answer': value,
+                                });
+                              }
+
+                              if (!_isExamFlow && !_isLevelExamFlow && !_isChallengeFlow) {
+                                final localDS = ref.read(assessmentLocalDataSourceProvider);
+                                localDS.cacheDiagnosticAnswers(_diagnosticTestTypeId, _userRawAnswers);
+                              }
 
                             if (_currentQuestionIndex <
                                 resolvedTotalQuestions - 1) {

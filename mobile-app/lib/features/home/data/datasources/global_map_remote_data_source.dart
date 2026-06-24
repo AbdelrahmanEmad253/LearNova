@@ -61,10 +61,12 @@ class GlobalMapRemoteDataSource {
       return (a['order_index'] as int).compareTo(b['order_index'] as int);
     });
 
-    // Fetch user resource logs and progress for all topics
+    // Fetch user resource logs, progress, and exam attempts
     final user = _supabaseClient.auth.currentUser;
     final Map<String, int> topicCompletedCounts = {};
     final Map<String, String> topicProgressStatus = {};
+    final Set<String> passedModuleIds = {};
+    final Map<String, String> levelAssessmentMap = {};
     
     if (user != null) {
       try {
@@ -91,6 +93,68 @@ class GlobalMapRemoteDataSource {
         for (final row in List<Map<String, dynamic>>.from(logsRes)) {
           final tid = row['topic_id']?.toString() ?? '';
           topicCompletedCounts[tid] = (topicCompletedCounts[tid] ?? 0) + 1;
+        }
+
+        // Fetch module_assessments to map module_id -> assessment_id + passing_score
+        final assessmentsRes = await _supabaseClient
+            .from('module_assessments')
+            .select('id, module_id, passing_score')
+            .eq('is_active', true)
+            .timeout(_queryTimeout);
+
+        final Map<String, String> moduleToAssessmentId = {};
+        final Map<String, int> assessmentPassingScore = {};
+        for (final row in List<Map<String, dynamic>>.from(assessmentsRes)) {
+          final modId = row['module_id']?.toString() ?? '';
+          final assId = row['id']?.toString() ?? '';
+          moduleToAssessmentId[modId] = assId;
+          assessmentPassingScore[assId] = (row['passing_score'] as int?) ?? 70;
+        }
+
+        // Fetch level_assessments to map level_id -> level assessment id
+        final levelAssessmentsRes = await _supabaseClient
+            .from('level_assessments')
+            .select('id, level_id')
+            .eq('is_active', true)
+            .timeout(_queryTimeout);
+
+        for (final row in List<Map<String, dynamic>>.from(levelAssessmentsRes)) {
+          final lId = row['level_id']?.toString() ?? '';
+          final assId = row['id']?.toString() ?? '';
+          levelAssessmentMap[lId] = assId;
+        }
+
+        // Fetch student_module_attempts to find which assessments the user passed
+        if (moduleToAssessmentId.isNotEmpty) {
+          final attemptsRes = await _supabaseClient
+              .from('student_module_attempts')
+              .select('assessment_id, score, passed')
+              .eq('user_id', user.id)
+              .timeout(_queryTimeout);
+
+          final attemptsByAssessment = <String, List<Map<String, dynamic>>>{};
+          for (final row in List<Map<String, dynamic>>.from(attemptsRes)) {
+            final assId = row['assessment_id']?.toString() ?? '';
+            attemptsByAssessment.putIfAbsent(assId, () => []).add(row);
+          }
+
+          for (final entry in moduleToAssessmentId.entries) {
+            final moduleId = entry.key;
+            final assessmentId = entry.value;
+            final passingScore = assessmentPassingScore[assessmentId] ?? 70;
+            final attempts = attemptsByAssessment[assessmentId];
+            if (attempts != null) {
+              final hasPassed = attempts.any((a) {
+                // Check the 'passed' boolean from Edge Function, or fallback to score >= passingScore
+                if (a['passed'] == true) return true;
+                final score = (a['score'] as num?)?.toInt() ?? 0;
+                return score >= passingScore;
+              });
+              if (hasPassed) {
+                passedModuleIds.add(moduleId);
+              }
+            }
+          }
         }
       } catch (e) {
         // Fallback to empty
@@ -175,6 +239,8 @@ class GlobalMapRemoteDataSource {
           sections: sections,
           contentItems: const [],
           progressPercentage: totalProgress,
+          isExamPassed: passedModuleIds.contains(modId) || (isFoundation && totalProgress >= 0.99),
+          isFoundation: isFoundation,
         ));
       }
 
@@ -194,7 +260,7 @@ class GlobalMapRemoteDataSource {
           levelTitle: levelTitle,
           modules: finalModules,
           isExamAvailable: true,
-          examId: 'exam_$levelId',
+          examId: levelAssessmentMap[levelId] ?? 'exam_$levelId',
           showCustomPreExam: false,
         ));
       }

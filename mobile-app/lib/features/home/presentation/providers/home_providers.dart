@@ -84,14 +84,15 @@ final globalMapProvider = FutureProvider<List<LevelModulesData>>((ref) async {
   final data =
       await ref.read(globalMapRemoteDataSourceProvider).getGlobalMapData(track);
 
-  // Sync completed nodes to the unlock tracker
+  // Sync completed nodes to the unlock tracker.
+  // GATE: A module only unlocks the next one when the user has PASSED its exam.
   final List<String> completedNodeIds = [];
   for (final level in data) {
-    final List<String> completedModuleTopicIds = [];
-
     for (int i = 0; i < level.modules.length; i++) {
       final module = level.modules[i];
-      if (module.progressPercentage >= 1.0) {
+
+      // Only mark a node as "passed" if the exam was passed — this gates progression.
+      if (module.isExamPassed) {
         completedNodeIds.add('w${level.levelNumber}_l${i + 1}');
       }
 

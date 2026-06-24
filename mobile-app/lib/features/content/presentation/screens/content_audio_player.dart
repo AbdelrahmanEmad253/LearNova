@@ -16,7 +16,10 @@ import 'package:learnova/features/content/presentation/providers/content_provide
 import 'package:learnova/features/content/presentation/controllers/audio_study_player_controller.dart';
 import 'package:learnova/features/content/presentation/screens/content_document_reader.dart';
 import 'package:learnova/features/content/presentation/screens/content_video_player.dart';
+import 'package:learnova/features/curriculum/presentation/notifiers/topic_session_notifier.dart';
+import 'package:learnova/features/curriculum/presentation/providers/topic_progress_provider.dart';
 import 'package:learnova/features/home/presentation/providers/home_providers.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 class AudioStudyPlayerScreen extends ConsumerStatefulWidget {
   final ContentItemPayload item;
@@ -42,6 +45,9 @@ class _AudioStudyPlayerScreenState extends ConsumerState<AudioStudyPlayerScreen>
   late final AnimationController _rotationController;
   late final AudioStudyPlayerController _controller;
 
+  AppLifecycleListener? _lifecycleListener;
+  ({String topicId, String userId, String formatType})? _sessionArgs;
+
   final List<String> _lyrics = const [
     'Isn\'t it rich?',
     'Are we a pair?',
@@ -59,6 +65,11 @@ class _AudioStudyPlayerScreenState extends ConsumerState<AudioStudyPlayerScreen>
       overlays: const [SystemUiOverlay.top],
     );
 
+    _rotationController = AnimationController(
+      vsync: this,
+      duration: const Duration(seconds: 10),
+    );
+
     _controller = AudioStudyPlayerController(
       repository: AudioPlaybackRepositoryImpl(),
       rawDuration: widget.item.meta,
@@ -68,10 +79,20 @@ class _AudioStudyPlayerScreenState extends ConsumerState<AudioStudyPlayerScreen>
     // Load the real audio source if a URL is available.
     _controller.initialize();
 
-    _rotationController = AnimationController(
-      vsync: this,
-      duration: const Duration(seconds: 10),
-    );
+    final userId = Supabase.instance.client.auth.currentUser?.id;
+    final topicId = widget.item.topicId;
+    if (userId != null && topicId != null) {
+      _sessionArgs = (userId: userId, topicId: topicId, formatType: widget.item.contentType);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        ref.read(topicSessionNotifierProvider.notifier).init(_sessionArgs!);
+        ref.read(topicSessionNotifierProvider.notifier).startSession();
+      });
+      _lifecycleListener = AppLifecycleListener(
+        onPause: () => ref.read(topicSessionNotifierProvider.notifier).pauseSession(),
+        onResume: () => ref.read(topicSessionNotifierProvider.notifier).resumeSession(),
+        onHide: () => ref.read(topicSessionNotifierProvider.notifier).flushTelemetry(),
+      );
+    }
   }
 
   ContentItemPayload? _nextItemInModule() {
@@ -88,7 +109,7 @@ class _AudioStudyPlayerScreenState extends ConsumerState<AudioStudyPlayerScreen>
     return items[nextIndex];
   }
 
-  void _onFinishPressed() {
+  Future<void> _onFinishPressed() async {
     if (widget.moduleId != null) {
       ref.read(moduleProgressProvider.notifier).markItemCompleted(
             moduleId: widget.moduleId!,
@@ -96,53 +117,15 @@ class _AudioStudyPlayerScreenState extends ConsumerState<AudioStudyPlayerScreen>
           );
     }
 
-    final ContentItemPayload? nextItem = _nextItemInModule();
-    if (nextItem == null) {
+    if (_sessionArgs != null) {
+      final notifier = ref.read(topicSessionNotifierProvider.notifier);
+      await notifier.consumeResource('Auditory');
+      await notifier.completeTopic();
+    }
+
+    if (mounted) {
       AppRouter.pop(context);
-      return;
     }
-
-    final ContentDestination destination =
-        ref.read(resolveContentDestinationUseCaseProvider)(nextItem);
-
-    if (destination == ContentDestination.audio) {
-      AppRouter.pushReplacement(
-        context,
-        AudioStudyPlayerScreen(
-          item: nextItem,
-          moduleItems: widget.moduleItems,
-          moduleIndex: (widget.moduleIndex ?? 0) + 1,
-          moduleId: widget.moduleId,
-        ),
-        routeName: AppRoutePaths.contentAudioPlayer,
-      );
-      return;
-    }
-
-    if (destination == ContentDestination.video) {
-      AppRouter.pushReplacement(
-        context,
-        VideoPlayerPlaceholderScreen(
-          item: nextItem,
-          moduleItems: widget.moduleItems,
-          moduleIndex: (widget.moduleIndex ?? 0) + 1,
-          moduleId: widget.moduleId,
-        ),
-        routeName: AppRoutePaths.contentVideoPlayer,
-      );
-      return;
-    }
-
-    AppRouter.pushReplacement(
-      context,
-      DocumentReaderPlaceholderScreen(
-        item: nextItem,
-        moduleItems: widget.moduleItems,
-        moduleIndex: (widget.moduleIndex ?? 0) + 1,
-        moduleId: widget.moduleId,
-      ),
-      routeName: AppRoutePaths.contentDocumentReader,
-    );
   }
 
   void _syncRotationWithPlayback() {
@@ -160,6 +143,7 @@ class _AudioStudyPlayerScreenState extends ConsumerState<AudioStudyPlayerScreen>
 
   @override
   void dispose() {
+    _lifecycleListener?.dispose();
     _controller.removeListener(_syncRotationWithPlayback);
     _controller.dispose();
     _rotationController.dispose();
@@ -169,6 +153,7 @@ class _AudioStudyPlayerScreenState extends ConsumerState<AudioStudyPlayerScreen>
 
   @override
   Widget build(BuildContext context) {
+    ref.watch(topicSessionNotifierProvider);
     final colors = AppColors.of(context);
 
     return Scaffold(
@@ -190,10 +175,10 @@ class _AudioStudyPlayerScreenState extends ConsumerState<AudioStudyPlayerScreen>
                 final double cardTop = showLyrics ? 341 : 158;
                 final double cardOpacity = showLyrics ? 0.5 : 0.75;
                 final double discSize = 316 * ss;
-                final ContentItemPayload? nextItem = _nextItemInModule();
                 final bool hasFinished =
                     _controller.totalDuration > Duration.zero &&
                         _controller.position >= _controller.totalDuration;
+                final sessionState = ref.watch(topicSessionNotifierProvider);
                 final String displayTitle = widget.item.title.trim().isEmpty
                     ? 'Linear Algebra (Vectors)'
                     : widget.item.title.trim();
@@ -368,24 +353,39 @@ class _AudioStudyPlayerScreenState extends ConsumerState<AudioStudyPlayerScreen>
                         width: 220 * sx,
                         height: 54 * sy,
                         child: FilledButton.icon(
-                          onPressed: _onFinishPressed,
+                          onPressed: (hasFinished && !sessionState.isLoading) ? _onFinishPressed : null,
                           style: FilledButton.styleFrom(
                             backgroundColor: colors.primary,
                             foregroundColor: colors.buttonForeground,
+                            disabledBackgroundColor: const Color(0xFF1D3D55),
+                            disabledForegroundColor: colors.textSecondary,
+                            minimumSize: const Size(160, 50),
                             shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(14 * ss),
+                              borderRadius: BorderRadius.circular(16),
                             ),
                           ),
-                          icon: Icon(Icons.check_circle_outline,
-                              color: colors.buttonForeground),
-                          label: Text(
-                            nextItem == null ? 'Finish' : 'Finish & Next',
-                            style: TextStyle(
-                              fontSize: 18 * ss,
-                              fontWeight: FontWeight.w700,
-                              fontFamily: 'Poppins',
-                            ),
-                          ),
+                          icon: sessionState.isLoading
+                              ? const SizedBox.shrink()
+                              : Icon(Icons.check_circle_outline, color: colors.buttonForeground),
+                          label: sessionState.isLoading
+                              ? SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    valueColor: AlwaysStoppedAnimation<Color>(
+                                      colors.buttonForeground,
+                                    ),
+                                  ),
+                                )
+                              : Text(
+                                  'Finished',
+                                  style: const TextStyle(
+                                    fontSize: 16,
+                                    fontWeight: FontWeight.w700,
+                                    fontFamily: 'Poppins',
+                                  ),
+                                ),
                         ),
                       )
                     else

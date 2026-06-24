@@ -6,13 +6,14 @@ class RankService {
 
   const RankService(this._client);
 
-  Future<List<Map<String, dynamic>>> fetchLeaderboard() async {
+  Future<List<Map<String, dynamic>>> fetchLeaderboard(String track) async {
     try {
-      final response = await _client
-          .from('student_profiles')
-          .select('user_id, xp_total, users(full_name, avatar_url)')
-          .order('xp_total', ascending: false)
-          .limit(100);
+      final response = await _client.rpc(
+        'get_leaderboard_data',
+        params: {
+          'target_track': track,
+        },
+      );
           
       return List<Map<String, dynamic>>.from(response);
     } catch (e) {
@@ -26,8 +27,16 @@ class RankService {
     if (user == null) return null;
     
     try {
+      // First get the user's track
+      final profileRes = await _client
+          .from('student_profiles')
+          .select('assigned_track')
+          .eq('id', user.id)
+          .maybeSingle();
+      final track = profileRes?['assigned_track'] ?? 'Foundation';
+
       // Find the user's position in the top 100 leaderboard
-      final leaderboard = await fetchLeaderboard();
+      final leaderboard = await fetchLeaderboard(track);
       final index = leaderboard.indexWhere((element) => element['user_id'] == user.id);
       
       if (index != -1) {

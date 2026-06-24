@@ -10,8 +10,9 @@ class PerkUseResult {
   /// Hint text returned by the Owl of Wisdom perk (null for other perks).
   final String? hint;
 
-  /// The option index eliminated by the Sly Fox perk (null for other perks).
-  final int? eliminatedOptionIndex;
+  /// The option value eliminated by the Sly Fox perk (null for other perks).
+  final String? eliminatedOptionKey;
+  final String? eliminatedOptionValue;
 
   /// Remaining count for the perk type that was just used.
   final int remaining;
@@ -22,16 +23,19 @@ class PerkUseResult {
   const PerkUseResult({
     required this.ok,
     this.hint,
-    this.eliminatedOptionIndex,
+    this.eliminatedOptionKey,
+    this.eliminatedOptionValue,
     required this.remaining,
     this.error,
   });
 
   factory PerkUseResult.fromJson(Map<String, dynamic> json) {
+    final effect = json['effect'] as Map<String, dynamic>?;
     return PerkUseResult(
       ok: json['ok'] as bool? ?? false,
-      hint: json['hint'] as String?,
-      eliminatedOptionIndex: json['eliminated_option_index'] as int?,
+      hint: effect?['hint'] as String?,
+      eliminatedOptionKey: effect?['eliminated_option_key'] as String?,
+      eliminatedOptionValue: effect?['eliminated_option_value'] as String?,
       remaining: (json['remaining'] as int?) ?? 0,
       error: json['error'] as String?,
     );
@@ -47,27 +51,32 @@ class QuestionPerkEffects {
   /// Hint text revealed by the Owl of Wisdom (null if not used).
   final String? hint;
 
-  /// Option index eliminated by the Sly Fox (null if not used).
-  final int? eliminatedOptionIndex;
+  /// Option value eliminated by the Sly Fox (null if not used).
+  final String? eliminatedOptionKey;
+  final String? eliminatedOptionValue;
 
   /// Set of perk IDs already cast on this question.
   final Set<String> usedPerkIds;
 
   const QuestionPerkEffects({
     this.hint,
-    this.eliminatedOptionIndex,
+    this.eliminatedOptionKey,
+    this.eliminatedOptionValue,
     this.usedPerkIds = const {},
   });
 
   QuestionPerkEffects copyWith({
     String? hint,
-    int? eliminatedOptionIndex,
+    String? eliminatedOptionKey,
+    String? eliminatedOptionValue,
     Set<String>? usedPerkIds,
   }) {
     return QuestionPerkEffects(
       hint: hint ?? this.hint,
-      eliminatedOptionIndex:
-          eliminatedOptionIndex ?? this.eliminatedOptionIndex,
+      eliminatedOptionKey:
+          eliminatedOptionKey ?? this.eliminatedOptionKey,
+      eliminatedOptionValue:
+          eliminatedOptionValue ?? this.eliminatedOptionValue,
       usedPerkIds: usedPerkIds ?? this.usedPerkIds,
     );
   }
@@ -145,9 +154,12 @@ class PerkDeckState {
   String? hintForQuestion(String questionId) =>
       questionEffects[questionId]?.hint;
 
-  /// Eliminated option index for [questionId], or null.
-  int? eliminatedOptionForQuestion(String questionId) =>
-      questionEffects[questionId]?.eliminatedOptionIndex;
+  /// Eliminated option value for [questionId], or null.
+  String? eliminatedOptionForQuestion(String questionId) =>
+      questionEffects[questionId]?.eliminatedOptionValue;
+
+  String? eliminatedOptionKeyForQuestion(String questionId) =>
+      questionEffects[questionId]?.eliminatedOptionKey;
 
   /// Remaining count for a perk.
   int remainingForPerk(String perkId) => remaining[perkId] ?? 0;

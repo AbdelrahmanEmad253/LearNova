@@ -2,6 +2,8 @@ class ProfileData {
   final String username;
   final String? avatarUrl;
   final String rank;
+  final int totalXp;
+  final double xpProgress;
   final double journeyCompletion;
   final List<TimeStatusPoint> timeStatus;
   final List<ProfileInfoItem> infoItems;
@@ -14,6 +16,8 @@ class ProfileData {
     required this.username,
     this.avatarUrl,
     required this.rank,
+    required this.totalXp,
+    required this.xpProgress,
     required this.journeyCompletion,
     required this.timeStatus,
     required this.infoItems,
@@ -40,16 +44,17 @@ class ProfileInfoItem {
 
 class PerkItem {
   final String name;
-  final String subtitle;
+  final int count;
   final String? imagePath;
 
-  const PerkItem({required this.name, required this.subtitle, this.imagePath});
+  const PerkItem({required this.name, required this.count, this.imagePath});
 }
 
 class BadgeItem {
   final String label;
   final bool isLocked;
+  final String? imageUrl;
 
-  const BadgeItem({required this.label, required this.isLocked});
+  const BadgeItem({required this.label, required this.isLocked, this.imageUrl});
 }
 
