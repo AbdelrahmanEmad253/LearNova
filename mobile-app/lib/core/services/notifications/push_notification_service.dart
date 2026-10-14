@@ -20,7 +20,7 @@ class PushNotificationService {
     await Entrig.init(
       apiKey: const String.fromEnvironment(
         'ENTRIG_API_KEY',
-        defaultValue: '***REMOVED***',
+        defaultValue: '',
       ),
       showForegroundNotification: true, // Show banner even when app is open
     );
